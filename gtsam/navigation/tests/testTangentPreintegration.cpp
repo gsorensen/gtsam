@@ -30,12 +30,12 @@ using namespace std::placeholders;
 static const double kDt = 0.1;
 
 Vector9 f(const Vector9& zeta, const Vector3& a, const Vector3& w) {
-  return TangentPreintegration::UpdatePreintegrated(a, w, kDt, zeta);
+  return TangentPreintegration<>::UpdatePreintegrated(a, w, kDt, zeta);
 }
 
 /* ************************************************************************* */
 TEST(TangentPreintegration, UpdateEstimate1) {
-  TangentPreintegration pim(testing::Params());
+  TangentPreintegration<> pim(testing::Params());
   const Vector3 acc(0.1, 0.2, 10), omega(0.1, 0.2, 0.3);
   Vector9 zeta;
   zeta.setZero();
@@ -49,7 +49,7 @@ TEST(TangentPreintegration, UpdateEstimate1) {
 
 /* ************************************************************************* */
 TEST(TangentPreintegration, UpdateEstimate2) {
-  TangentPreintegration pim(testing::Params());
+  TangentPreintegration<> pim(testing::Params());
   const Vector3 acc(0.1, 0.2, 10), omega(0.1, 0.2, 0.3);
   Vector9 zeta;
   zeta << 0.01, 0.02, 0.03, 100, 200, 300, 10, 5, 3;
@@ -68,13 +68,13 @@ TEST(ImuFactor, BiasCorrectionJacobians) {
 
   std::function<Vector9(const Vector3&, const Vector3&)> preintegrated =
       [&](const Vector3& a, const Vector3& w) {
-        TangentPreintegration pim(testing::Params(), Bias(a, w));
+        TangentPreintegration<> pim(testing::Params(), Bias(a, w));
         testing::integrateMeasurements(measurements, &pim);
         return pim.preintegrated();
       };
 
   // Actual pre-integrated values
-  TangentPreintegration pim(testing::Params());
+  TangentPreintegration<> pim(testing::Params());
   testing::integrateMeasurements(measurements, &pim);
 
   EXPECT(
@@ -87,7 +87,7 @@ TEST(ImuFactor, BiasCorrectionJacobians) {
 
 /* ************************************************************************* */
 TEST(TangentPreintegration, computeError) {
-  TangentPreintegration pim(testing::Params());
+  TangentPreintegration<> pim(testing::Params());
   NavState x1, x2;
   imuBias::ConstantBias bias;
   Matrix9 aH1, aH2;
@@ -95,7 +95,7 @@ TEST(TangentPreintegration, computeError) {
   pim.computeError(x1, x2, bias, aH1, aH2, aH3);
   std::function<Vector9(const NavState&, const NavState&,
                         const imuBias::ConstantBias&)>
-      f = std::bind(&TangentPreintegration::computeError, pim,
+      f = std::bind(&TangentPreintegration<>::computeError, pim,
                     std::placeholders::_1, std::placeholders::_2,
                     std::placeholders::_3, nullptr, nullptr,
                     nullptr);
@@ -108,27 +108,27 @@ TEST(TangentPreintegration, computeError) {
 /* ************************************************************************* */
 TEST(TangentPreintegration, Compose) {
   testing::SomeMeasurements measurements;
-  TangentPreintegration pim(testing::Params());
+  TangentPreintegration<> pim(testing::Params());
   testing::integrateMeasurements(measurements, &pim);
 
   std::function<Vector9(const Vector9&, const Vector9&)> f =
       [pim](const Vector9& zeta01, const Vector9& zeta12) {
-        return TangentPreintegration::Compose(zeta01, zeta12, pim.deltaTij());
+        return TangentPreintegration<>::Compose(zeta01, zeta12, pim.deltaTij());
       };
 
   // Expected merge result
-  TangentPreintegration expected_pim02(testing::Params());
+  TangentPreintegration<> expected_pim02(testing::Params());
   testing::integrateMeasurements(measurements, &expected_pim02);
   testing::integrateMeasurements(measurements, &expected_pim02);
 
   // Actual result
   Matrix9 H1, H2;
-  TangentPreintegration actual_pim02 = pim;
+  TangentPreintegration<> actual_pim02 = pim;
   actual_pim02.mergeWith(pim, &H1, &H2);
 
   const Vector9 zeta = pim.preintegrated();
   const Vector9 actual_zeta =
-      TangentPreintegration::Compose(zeta, zeta, pim.deltaTij());
+      TangentPreintegration<>::Compose(zeta, zeta, pim.deltaTij());
   EXPECT(assert_equal(expected_pim02.preintegrated(), actual_zeta, 1e-7));
   EXPECT(assert_equal(numericalDerivative21(f, zeta, zeta), H1, 1e-7));
   EXPECT(assert_equal(numericalDerivative22(f, zeta, zeta), H2, 1e-7));
@@ -139,14 +139,14 @@ TEST(TangentPreintegration, MergedBiasDerivatives) {
   testing::SomeMeasurements measurements;
 
   auto f = [&](const Vector3& a, const Vector3& w) {
-    TangentPreintegration pim02(testing::Params(), Bias(a, w));
+    TangentPreintegration<> pim02(testing::Params(), Bias(a, w));
     testing::integrateMeasurements(measurements, &pim02);
     testing::integrateMeasurements(measurements, &pim02);
     return pim02.preintegrated();
   };
 
   // Expected merge result
-  TangentPreintegration expected_pim02(testing::Params());
+  TangentPreintegration<> expected_pim02(testing::Params());
   testing::integrateMeasurements(measurements, &expected_pim02);
   testing::integrateMeasurements(measurements, &expected_pim02);
 

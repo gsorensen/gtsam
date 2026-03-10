@@ -27,10 +27,18 @@
 #include <gtsam/navigation/PreintegrationParams.h>
 
 #include <iosfwd>
+#include <ostream>
 #include <string>
 #include <utility>
 
 namespace gtsam {
+
+// Forward declarations for operator<< template
+template <typename Bias>
+class PreintegrationBase;
+
+template <typename Bias>
+std::ostream& operator<<(std::ostream& os, const PreintegrationBase<Bias>& pim);
 
 /**
  * PreintegrationBase is the base class for PreintegratedMeasurements
@@ -65,15 +73,6 @@ class GTSAM_EXPORT PreintegrationBase {
   /// @name Constructors
   /// @{
 
-  /**
-   *  Constructor, initializes the variables in the base class
-   *  @param p    Parameters, typically fixed in a single application
-   *  @param bias Current estimate of acceleration and rotation rate biases
-   */
-  PreintegrationBase(
-      const std::shared_ptr<Params>& p,
-      const imuBias::ConstantBias& biasHat = imuBias::ConstantBias());
-
   /// @}
 
   /// @name Basic utilities
@@ -102,7 +101,7 @@ class GTSAM_EXPORT PreintegrationBase {
 
   /// @name Instance variables access
   /// @{
-  const imuBias::ConstantBias& biasHat() const { return biasHat_; }
+  const Bias& biasHat() const { return biasHat_; }
   double deltaTij() const { return deltaTij_; }
 
   virtual Vector3 deltaPij() const = 0;
@@ -116,8 +115,8 @@ class GTSAM_EXPORT PreintegrationBase {
 
   /// @name Testable
   /// @{
-  GTSAM_EXPORT friend std::ostream& operator<<(std::ostream& os,
-                                               const PreintegrationBase& pim);
+  GTSAM_EXPORT friend std::ostream& operator<< <Bias>(std::ostream& os,
+                                               const PreintegrationBase<Bias>& pim);
   virtual void print(const std::string& s = "") const;
   /// @}
 

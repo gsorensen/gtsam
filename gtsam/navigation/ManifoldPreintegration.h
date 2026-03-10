@@ -34,15 +34,17 @@ namespace gtsam {
 template <typename Bias = imuBias::ConstantBias>
 class GTSAM_EXPORT ManifoldPreintegration : public PreintegrationBase<Bias> {
  protected:
-  using Params = typename PreintegrationBase<Bias>::Params;
   using PreintegrationBase<Bias>::biasHat_;
   using PreintegrationBase<Bias>::deltaTij_;
   using PreintegrationBase<Bias>::p_;
   using PreintegrationBase<Bias>::p;
-  using PreintegrationBase<Bias>::correctMeasurementsBySensorPose;
+
+ public:
+  using Params = typename PreintegrationBase<Bias>::Params;
   using PreintegrationBase<Bias>::deltaTij;
   using PreintegrationBase<Bias>::params;
   using PreintegrationBase<Bias>::biasHat;
+  using PreintegrationBase<Bias>::correctMeasurementsBySensorPose;
   /**
    * Pre-integrated navigation state, from frame i to frame
    * j Note: relative position does not take into account
@@ -74,7 +76,8 @@ class GTSAM_EXPORT ManifoldPreintegration : public PreintegrationBase<Bias> {
    *  @param bias Current estimate of acceleration and rotation rate biases
    */
 
-  ManifoldPreintegration(const std::shared_ptr<Params>& p, const Bias& biasHat)
+  ManifoldPreintegration(const std::shared_ptr<Params>& p,
+                         const Bias& biasHat = Bias())
       : PreintegrationBase<Bias>(p, biasHat) {
     resetIntegration();
   }

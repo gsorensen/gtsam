@@ -145,7 +145,7 @@ TEST(CombinedImuFactor, FirstOrderPreIntegratedMeasurements) {
   };
 
   // Actual pre-integrated values
-  PreintegratedCombinedMeasurementsT<TangentPreintegration> pim(p);
+  PreintegratedCombinedMeasurementsT<TangentPreintegration<imuBias::ConstantBias>, imuBias::ConstantBias> pim(p);
   testing::integrateMeasurements(measurements, &pim);
 
   EXPECT(assert_equal(numericalDerivative21<Vector9, Vector3, Vector3>(preintegrated, Z_3x1, Z_3x1),

@@ -18,6 +18,7 @@
 #pragma once
 
 #include <gtsam/inference/Symbol.h>
+#include <gtsam/navigation/CombinedImuFactor.h>
 #include <gtsam/navigation/ImuBias.h>
 
 using namespace std;
@@ -94,12 +95,12 @@ namespace {
   void testGroup##testName##Helper(TestResult& result_,        \
                                    const std::string& name_);  \
   TEST(testGroup, testName) {                                  \
-    using M = ManifoldPreintegration;                          \
+    using M = ManifoldPreintegration<imuBias::ConstantBias>;   \
     using PM = PreintegratedImuMeasurementsT<M>;               \
-    using CM = PreintegratedCombinedMeasurementsT<M>;          \
-    using T = TangentPreintegration;                           \
+    using CM = PreintegratedCombinedMeasurementsT<M, imuBias::ConstantBias>; \
+    using T = TangentPreintegration<imuBias::ConstantBias>;    \
     using PT = PreintegratedImuMeasurementsT<T>;               \
-    using CT = PreintegratedCombinedMeasurementsT<T>;          \
+    using CT = PreintegratedCombinedMeasurementsT<T, imuBias::ConstantBias>; \
     testGroup##testName##Helper<PM, CM>(result_, this->name_); \
     testGroup##testName##Helper<PT, CT>(result_, this->name_); \
   }                                                            \
