@@ -24,7 +24,6 @@
 
 /* GTSAM includes */
 #include <gtsam/navigation/PreintegrationCombinedParams.h>
-#include <gtsam/nonlinear/NoiseModelFactorN.h>
 
 #include "gtsam/navigation/ImuBias.h"
 
