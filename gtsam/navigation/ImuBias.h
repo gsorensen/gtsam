@@ -19,6 +19,7 @@
 
 #include <gtsam/base/OptionalJacobian.h>
 #include <gtsam/base/VectorSpace.h>
+
 #include <iosfwd>
 #if GTSAM_ENABLE_BOOST_SERIALIZATION
 #include <boost/serialization/nvp.hpp>
@@ -29,29 +30,33 @@ namespace gtsam {
 /// All bias models live in the imuBias namespace
 namespace imuBias {
 
-class GTSAM_EXPORT ConstantBias {
-private:
-  Vector3 biasAcc_; ///< The units for stddev are σ = m/s² or m √Hz/s²
-  Vector3 biasGyro_; ///< The units for stddev are σ = rad/s or rad √Hz/s
+class GTSAM_EXPORT GaussMarkovBias {
+ private:
+  Vector3 biasAcc_;   ///< The units for stddev are σ = m/s² or m √Hz/s²
+  Vector3 biasGyro_;  ///< The units for stddev are σ = rad/s or rad √Hz/s
 
-public:
+ public:
+};
+
+class GTSAM_EXPORT ConstantBias {
+ private:
+  Vector3 biasAcc_;   ///< The units for stddev are σ = m/s² or m √Hz/s²
+  Vector3 biasGyro_;  ///< The units for stddev are σ = rad/s or rad √Hz/s
+
+ public:
   /// dimension of the variable - used to autodetect sizes
   static const size_t dimension = 6;
 
   /// @name Standard Constructors
   /// @{
 
-  ConstantBias() :
-      biasAcc_(0.0, 0.0, 0.0), biasGyro_(0.0, 0.0, 0.0) {
-  }
+  ConstantBias() : biasAcc_(0.0, 0.0, 0.0), biasGyro_(0.0, 0.0, 0.0) {}
 
-  ConstantBias(const Vector3& biasAcc, const Vector3& biasGyro) :
-      biasAcc_(biasAcc), biasGyro_(biasGyro) {
-  }
+  ConstantBias(const Vector3& biasAcc, const Vector3& biasGyro)
+      : biasAcc_(biasAcc), biasGyro_(biasGyro) {}
 
-  explicit ConstantBias(const Vector6& v) :
-      biasAcc_(v.head<3>()), biasGyro_(v.tail<3>()) {
-  }
+  explicit ConstantBias(const Vector6& v)
+      : biasAcc_(v.head<3>()), biasGyro_(v.tail<3>()) {}
 
   /// @}
 
@@ -63,16 +68,13 @@ public:
   }
 
   /** get accelerometer bias */
-  const Vector3& accelerometer() const {
-    return biasAcc_;
-  }
+  const Vector3& accelerometer() const { return biasAcc_; }
 
   /** get gyroscope bias */
-  const Vector3& gyroscope() const {
-    return biasGyro_;
-  }
+  const Vector3& gyroscope() const { return biasGyro_; }
 
-  /** Correct an accelerometer measurement using this bias model, and optionally compute Jacobians */
+  /** Correct an accelerometer measurement using this bias model, and optionally
+   * compute Jacobians */
   Vector3 correctAccelerometer(const Vector3& measurement,
                                OptionalJacobian<3, 6> H1 = {},
                                OptionalJacobian<3, 3> H2 = {}) const {
@@ -81,7 +83,8 @@ public:
     return measurement - biasAcc_;
   }
 
-  /** Correct a gyroscope measurement using this bias model, and optionally compute Jacobians */
+  /** Correct a gyroscope measurement using this bias model, and optionally
+   * compute Jacobians */
   Vector3 correctGyroscope(const Vector3& measurement,
                            OptionalJacobian<3, 6> H1 = {},
                            OptionalJacobian<3, 3> H2 = {}) const {
@@ -102,8 +105,8 @@ public:
 
   /** equality up to tolerance */
   inline bool equals(const ConstantBias& expected, double tol = 1e-5) const {
-    return equal_with_abs_tol(biasAcc_, expected.biasAcc_, tol)
-        && equal_with_abs_tol(biasGyro_, expected.biasGyro_, tol);
+    return equal_with_abs_tol(biasAcc_, expected.biasAcc_, tol) &&
+           equal_with_abs_tol(biasGyro_, expected.biasGyro_, tol);
   }
 
   /// @}
@@ -111,9 +114,7 @@ public:
   /// @{
 
   /** identity for group operation */
-  static ConstantBias Identity() {
-    return ConstantBias();
-  }
+  static ConstantBias Identity() { return ConstantBias(); }
 
   /** inverse */
   inline ConstantBias operator-() const {
@@ -151,33 +152,29 @@ public:
 
   /// @}
 
-private:
-
+ private:
   /// @name Advanced Interface
   /// @{
 
 #if GTSAM_ENABLE_BOOST_SERIALIZATION
   /** Serialization function */
   friend class boost::serialization::access;
-  template<class ARCHIVE>
-  void serialize(ARCHIVE & ar, const unsigned int /*version*/) {
-    ar & BOOST_SERIALIZATION_NVP(biasAcc_);
-    ar & BOOST_SERIALIZATION_NVP(biasGyro_);
+  template <class ARCHIVE>
+  void serialize(ARCHIVE& ar, const unsigned int /*version*/) {
+    ar& BOOST_SERIALIZATION_NVP(biasAcc_);
+    ar& BOOST_SERIALIZATION_NVP(biasGyro_);
   }
 #endif
 
-
-public:
+ public:
   GTSAM_MAKE_ALIGNED_OPERATOR_NEW
   /// @}
 
-}; // ConstantBias class
-} // namespace imuBias
+};  // ConstantBias class
+}  // namespace imuBias
 
-template<>
-struct traits<imuBias::ConstantBias> : public internal::VectorSpace<
-    imuBias::ConstantBias> {
-};
+template <>
+struct traits<imuBias::ConstantBias>
+    : public internal::VectorSpace<imuBias::ConstantBias> {};
 
-} // namespace gtsam
-
+}  // namespace gtsam

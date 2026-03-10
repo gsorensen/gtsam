@@ -21,10 +21,10 @@
 
 #pragma once
 
-#include <gtsam/navigation/PreintegrationParams.h>
-#include <gtsam/navigation/NavState.h>
-#include <gtsam/navigation/ImuBias.h>
 #include <gtsam/linear/NoiseModel.h>
+#include <gtsam/navigation/ImuBias.h>
+#include <gtsam/navigation/NavState.h>
+#include <gtsam/navigation/PreintegrationParams.h>
 
 #include <iosfwd>
 #include <string>
@@ -67,7 +67,8 @@ class GTSAM_EXPORT PreintegrationBase {
    *  @param p    Parameters, typically fixed in a single application
    *  @param bias Current estimate of acceleration and rotation rate biases
    */
-  PreintegrationBase(const std::shared_ptr<Params>& p,
+  PreintegrationBase(
+      const std::shared_ptr<Params>& p,
       const imuBias::ConstantBias& biasHat = imuBias::ConstantBias());
 
   /// @}
@@ -82,20 +83,17 @@ class GTSAM_EXPORT PreintegrationBase {
   /// Re-initialize PreintegratedMeasurements and set new bias
   void resetIntegrationAndSetBias(const Bias& biasHat);
 
-  /// check parameters equality: checks whether shared pointer points to same Params object.
+  /// check parameters equality: checks whether shared pointer points to same
+  /// Params object.
   bool matchesParamsWith(const PreintegrationBase& other) const {
     return p_.get() == other.p_.get();
   }
 
   /// shared pointer to params
-  const std::shared_ptr<Params>& params() const {
-    return p_;
-  }
+  const std::shared_ptr<Params>& params() const { return p_; }
 
   /// const reference to params
-  Params& p() const {
-    return *p_;
-  }
+  Params& p() const { return *p_; }
 
   /// @}
 
@@ -104,9 +102,9 @@ class GTSAM_EXPORT PreintegrationBase {
   const imuBias::ConstantBias& biasHat() const { return biasHat_; }
   double deltaTij() const { return deltaTij_; }
 
-  virtual Vector3  deltaPij() const = 0;
-  virtual Vector3  deltaVij() const = 0;
-  virtual Rot3     deltaRij() const = 0;
+  virtual Vector3 deltaPij() const = 0;
+  virtual Vector3 deltaVij() const = 0;
+  virtual Rot3 deltaRij() const = 0;
   virtual NavState deltaXij() const = 0;
 
   // Exposed for MATLAB
@@ -115,8 +113,9 @@ class GTSAM_EXPORT PreintegrationBase {
 
   /// @name Testable
   /// @{
-  GTSAM_EXPORT friend std::ostream& operator<<(std::ostream& os, const PreintegrationBase& pim);
-  virtual void print(const std::string& s="") const;
+  GTSAM_EXPORT friend std::ostream& operator<<(std::ostream& os,
+                                               const PreintegrationBase& pim);
+  virtual void print(const std::string& s = "") const;
   /// @}
 
   /// @name Main functionality
@@ -124,8 +123,9 @@ class GTSAM_EXPORT PreintegrationBase {
 
   /**
    * Subtract estimate and correct for sensor pose
-   * Compute the derivatives due to non-identity body_P_sensor (rotation and centrifugal acc)
-   * Ignore D_correctedOmega_measuredAcc as it is trivially zero
+   * Compute the derivatives due to non-identity body_P_sensor (rotation and
+   * centrifugal acc) Ignore D_correctedOmega_measuredAcc as it is trivially
+   * zero
    */
   std::pair<Vector3, Vector3> correctMeasurementsBySensorPose(
       const Vector3& unbiasedAcc, const Vector3& unbiasedOmega,
@@ -136,19 +136,22 @@ class GTSAM_EXPORT PreintegrationBase {
   /**
    *  Update preintegrated measurements and get derivatives
    * It takes measured quantities in the j frame
-   * Modifies preintegrated quantities in place after correcting for bias and possibly sensor pose
+   * Modifies preintegrated quantities in place after correcting for bias and
+   * possibly sensor pose
    */
   virtual void update(const Vector3& measuredAcc, const Vector3& measuredOmega,
-      const double dt, Matrix9* A, Matrix93* B, Matrix93* C) = 0;
+                      const double dt, Matrix9* A, Matrix93* B,
+                      Matrix93* C) = 0;
 
   /// Version without derivatives
   virtual void integrateMeasurement(const Vector3& measuredAcc,
-      const Vector3& measuredOmega, const double dt);
+                                    const Vector3& measuredOmega,
+                                    const double dt);
 
   /// Given the estimate of the bias, return a NavState tangent vector
   /// summarizing the preintegrated IMU measurements so far
   virtual Vector9 biasCorrectedDelta(const imuBias::ConstantBias& bias_i,
-      OptionalJacobian<9, 6> H = {}) const = 0;
+                                     OptionalJacobian<9, 6> H = {}) const = 0;
 
   /// Predict state at time j
   NavState predict(const NavState& state_i, const imuBias::ConstantBias& bias_i,
@@ -176,11 +179,11 @@ class GTSAM_EXPORT PreintegrationBase {
 #if GTSAM_ENABLE_BOOST_SERIALIZATION
   /** Serialization function */
   friend class boost::serialization::access;
-  template<class ARCHIVE>
-  void serialize(ARCHIVE & ar, const unsigned int /*version*/) {
-    ar & BOOST_SERIALIZATION_NVP(p_);
-    ar & BOOST_SERIALIZATION_NVP(biasHat_);
-    ar & BOOST_SERIALIZATION_NVP(deltaTij_);
+  template <class ARCHIVE>
+  void serialize(ARCHIVE& ar, const unsigned int /*version*/) {
+    ar& BOOST_SERIALIZATION_NVP(p_);
+    ar& BOOST_SERIALIZATION_NVP(biasHat_);
+    ar& BOOST_SERIALIZATION_NVP(deltaTij_);
   }
 #endif
 
@@ -188,4 +191,4 @@ class GTSAM_EXPORT PreintegrationBase {
   GTSAM_MAKE_ALIGNED_OPERATOR_NEW
 };
 
-}  /// namespace gtsam
+}  // namespace gtsam

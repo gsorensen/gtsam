@@ -24,6 +24,9 @@
 
 /* GTSAM includes */
 #include <gtsam/navigation/PreintegrationCombinedParams.h>
+#include <gtsam/nonlinear/NoiseModelFactorN.h>
+
+#include "gtsam/navigation/ImuBias.h"
 
 namespace gtsam {
 
@@ -64,7 +67,8 @@ typedef ManifoldPreintegration DefaultPreintegrationType;
  * @ingroup navigation
  */
 template <class PreintegrationType>
-class GTSAM_EXPORT PreintegratedCombinedMeasurementsT : public PreintegrationType {
+class GTSAM_EXPORT PreintegratedCombinedMeasurementsT
+    : public PreintegrationType {
  public:
   typedef PreintegrationCombinedParams Params;
 
@@ -77,7 +81,11 @@ class GTSAM_EXPORT PreintegratedCombinedMeasurementsT : public PreintegrationTyp
    */
   Eigen::Matrix<double, 15, 15> preintMeasCov_;
 
-  template <class PIM> friend class CombinedImuFactorT;
+  template <class PIM>
+  friend class CombinedImuFactorT;
+
+  template <class PIM>
+  friend class CombinedImuFactor2T;
 
  public:
   /// @name Constructors
@@ -141,8 +149,9 @@ class GTSAM_EXPORT PreintegratedCombinedMeasurementsT : public PreintegrationTyp
   void print(
       const std::string& s = "Preintegrated Measurements:") const override;
   /// equals
-  bool equals(const PreintegratedCombinedMeasurementsT<PreintegrationType>& expected,
-              double tol = 1e-9) const;
+  bool equals(
+      const PreintegratedCombinedMeasurementsT<PreintegrationType>& expected,
+      double tol = 1e-9) const;
   /// @}
 
   /// @name Main functionality
@@ -165,9 +174,12 @@ class GTSAM_EXPORT PreintegratedCombinedMeasurementsT : public PreintegrationTyp
   /// @}
 
 #ifdef GTSAM_ALLOW_DEPRECATED_SINCE_V43
-/// @deprecated: biasAccOmegaInt is no longer used. Use a prior on first bias instead.
+  /// @deprecated: biasAccOmegaInt is no longer used. Use a prior on first bias
+  /// instead.
   void resetIntegration(const gtsam::Matrix6& Q_init) {
-    std::cerr << "Warning: setBiasAccOmegaInit() is deprecated and no longer used." << std::endl;
+    std::cerr
+        << "Warning: setBiasAccOmegaInit() is deprecated and no longer used."
+        << std::endl;
     PreintegrationType::resetIntegration();
     preintMeasCov_.setZero();
   }
@@ -190,7 +202,8 @@ class GTSAM_EXPORT PreintegratedCombinedMeasurementsT : public PreintegrationTyp
 };
 
 // For backward compatibility:
-using PreintegratedCombinedMeasurements = PreintegratedCombinedMeasurementsT<DefaultPreintegrationType>;
+using PreintegratedCombinedMeasurements =
+    PreintegratedCombinedMeasurementsT<DefaultPreintegrationType>;
 
 /**
  * CombinedImuFactor is a 6-ways factor involving previous state (pose and
@@ -243,10 +256,10 @@ class GTSAM_EXPORT CombinedImuFactorT
    * @param bias_j Current bias key
    * @param PreintegratedCombinedMeasurements Combined IMU measurements
    */
-  CombinedImuFactorT(
-      Key pose_i, Key vel_i, Key pose_j, Key vel_j, Key bias_i, Key bias_j,
-      const PIM& preintegratedMeasurements)
-      : Base(noiseModel::Gaussian::Covariance(preintegratedMeasurements.preintMeasCov()),
+  CombinedImuFactorT(Key pose_i, Key vel_i, Key pose_j, Key vel_j, Key bias_i,
+                     Key bias_j, const PIM& preintegratedMeasurements)
+      : Base(noiseModel::Gaussian::Covariance(
+                 preintegratedMeasurements.preintMeasCov()),
              pose_i, vel_i, pose_j, vel_j, bias_i, bias_j),
         pim_(preintegratedMeasurements) {}
 
@@ -272,9 +285,7 @@ class GTSAM_EXPORT CombinedImuFactorT
 
   /** Access the preintegrated measurements. */
 
-  const PIM& preintegratedMeasurements() const {
-    return pim_;
-  }
+  const PIM& preintegratedMeasurements() const { return pim_; }
 
   /** implement functions needed to derive from Factor */
 
@@ -311,7 +322,8 @@ using CombinedImuFactor = CombinedImuFactorT<>;
 
 // operator<< for CombinedImuFactorT
 template <class PIM>
-GTSAM_EXPORT std::ostream& operator<<(std::ostream& os, const CombinedImuFactorT<PIM>& f);
+GTSAM_EXPORT std::ostream& operator<<(std::ostream& os,
+                                      const CombinedImuFactorT<PIM>& f);
 
 template <>
 struct traits<PreintegrationCombinedParams>
@@ -319,9 +331,80 @@ struct traits<PreintegrationCombinedParams>
 
 template <class PreintegrationType>
 struct traits<PreintegratedCombinedMeasurementsT<PreintegrationType>>
-    : public Testable<PreintegratedCombinedMeasurementsT<PreintegrationType>> {};
- 
-template <class PIM>
-struct traits<CombinedImuFactorT<PIM>> : public Testable<CombinedImuFactorT<PIM>> {};
+    : public Testable<PreintegratedCombinedMeasurementsT<PreintegrationType>> {
+};
 
+template <class PIM>
+struct traits<CombinedImuFactorT<PIM>>
+    : public Testable<CombinedImuFactorT<PIM>> {};
+
+template <class PIM = PreintegratedCombinedMeasurements>
+class GTSAM_EXPORT CombinedImuFactor2T
+    : public NoiseModelFactorN<NavState, NavState, imuBias::ConstantBias,
+                               imuBias::ConstantBias> {
+ private:
+  typedef CombinedImuFactor2T<PIM> This;
+  typedef NoiseModelFactorN<NavState, NavState, imuBias::ConstantBias,
+                            imuBias::ConstantBias>
+      Base;
+
+  PIM pim_;
+
+ public:
+  using Base::evaluateError;
+
+  typedef std::shared_ptr<This> shared_ptr;
+
+  CombinedImuFactor2T() {}
+
+  CombinedImuFactor2T(Key state_i, Key state_j, Key bias_i, Key bias_j,
+                      const PIM& preintegratedMeasurements)
+      : Base(noiseModel::Gaussian::Covariance(
+                 preintegratedMeasurements.preintMeasCov()),
+             state_i, state_j, bias_i, bias_j),
+        pim_(preintegratedMeasurements) {}
+  ~CombinedImuFactor2T() override {}
+
+  gtsam::NonlinearFactor::shared_ptr clone() const override {
+    return std::make_shared<This>(*this);
+  }
+
+  void print(const std::string& s = "", const KeyFormatter& keyFormatter =
+                                            DefaultKeyFormatter) const override;
+  bool equals(const NonlinearFactor& expected,
+              double tol = 1e-9) const override;
+
+  const PIM& preintegratedMeasurements() const { return pim_; }
+
+  Vector evaluateError(const NavState& state_i, const NavState& state_j,
+                       const imuBias::ConstantBias& bias_i,
+                       const imuBias::ConstantBias& bias_j,
+                       OptionalMatrixType H1, OptionalMatrixType H2,
+                       OptionalMatrixType H3,
+                       OptionalMatrixType H4) const override;
+
+ private:
+#if GTSAM_ENABLE_BOOST_SERIALIZATION
+  /** Serialization function */
+  friend class boost::serialization::access;
+  template <class ARCHIVE>
+  void serialize(ARCHIVE& ar, const unsigned int /*version*/) {
+    // NoiseModelFactor4 instead of NoiseModelFactorN for backward compatibility
+    ar& boost::serialization::make_nvp(
+        "NoiseModelFactor4", boost::serialization::base_object<Base>(*this));
+    ar& BOOST_SERIALIZATION_NVP(pim_);
+  }
+#endif
+};
+
+using CombinedImuFactor2 = CombinedImuFactor2T<>;
+
+template <class PIM>
+GTSAM_EXPORT std::ostream& operator<<(std::ostream& os,
+                                      const CombinedImuFactor2T<PIM>& f);
+
+template <class PIM>
+struct traits<CombinedImuFactor2T<PIM>>
+    : public Testable<CombinedImuFactor2T<PIM>> {};
 }  // namespace gtsam
+//
