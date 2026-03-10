@@ -32,10 +32,121 @@ namespace imuBias {
 
 class GTSAM_EXPORT GaussMarkovBias {
  private:
+  double tauAcc_;     ///< Correlation time for accelerometer bias
+  double tauGyro_;    ///< Correlation time for gyroscope bias
   Vector3 biasAcc_;   ///< The units for stddev are σ = m/s² or m √Hz/s²
   Vector3 biasGyro_;  ///< The units for stddev are σ = rad/s or rad √Hz/s
 
  public:
+  static const size_t dimension = 6;
+
+  /// @name Standard Constructors
+  /// @{
+
+  GaussMarkovBias()
+      : tauAcc_(1),
+        tauGyro_(1),
+        biasAcc_(0.0, 0.0, 0.0),
+        biasGyro_(0.0, 0.0, 0.0) {}
+
+  GaussMarkovBias(const Vector3& biasAcc, const Vector3& biasGyro,
+                  const double& tauAcc, const double& tauGyro)
+      : tauAcc_(tauAcc),
+        tauGyro_(tauGyro),
+        biasAcc_(biasAcc),
+        biasGyro_(biasGyro) {}
+
+  explicit GaussMarkovBias(const Vector6& v, const double& tauAcc,
+                           const double& tauGyro)
+      : tauAcc_(tauAcc),
+        tauGyro_(tauGyro),
+        biasAcc_(v.head<3>()),
+        biasGyro_(v.tail<3>()) {}
+  /// @}
+
+  Vector6 vector() const {
+    Vector6 v;
+    v << biasAcc_, biasGyro_;
+    return v;
+  }
+
+  const Vector3& accelerometer() const { return biasAcc_; }
+  const Vector3& gyroscope() const { return biasGyro_; }
+
+  Vector3 correctAccelerometer(const Vector3& measurement, double dt,
+                               OptionalJacobian<3, 6> H1 = {},
+                               OptionalJacobian<3, 3> H2 = {}) const {
+    // Compute Jacobians and take the time constant into account
+    const double beta = exp(-dt / tauAcc_);
+    if (H1) (*H1) << -beta * I_3x3, Z_3x3;
+    if (H2) (*H2) << I_3x3;
+    return measurement - beta * biasAcc_;
+  }
+
+  Vector3 correctGyroscope(const Vector3& measurement, const double dt,
+                           OptionalJacobian<3, 6> H1 = {},
+                           OptionalJacobian<3, 3> H2 = {}) const {
+    const double beta = exp(-dt / tauGyro_);
+    if (H1) (*H1) << Z_3x3, -beta * I_3x3;
+    if (H2) (*H2) << I_3x3;
+    return measurement - beta * biasGyro_;
+  }
+
+  /// @name Testable
+  /// @{
+
+  /// ostream operator
+  GTSAM_EXPORT friend std::ostream& operator<<(std::ostream& os,
+                                               const GaussMarkovBias& bias);
+
+  /// print with optional string
+  void print(const std::string& s = "") const;
+
+  /** equality up to tolerance */
+  inline bool equals(const GaussMarkovBias& expected, double tol = 1e-5) const {
+    return equal_with_abs_tol(biasAcc_, expected.biasAcc_, tol) &&
+           equal_with_abs_tol(biasGyro_, expected.biasGyro_, tol);
+  }
+
+  /// @}
+
+  /// @name Group
+  /// @{
+  static GaussMarkovBias Identity() { return GaussMarkovBias(); }
+
+  inline GaussMarkovBias operator-() const {
+    return GaussMarkovBias(-biasAcc_, -biasGyro_, tauAcc_, tauGyro_);
+  }
+
+  GaussMarkovBias operator+(const Vector6& v) const {
+    return GaussMarkovBias(biasAcc_ + v.head<3>(), biasGyro_ + v.tail<3>(),
+                           tauAcc_, tauGyro_);
+  }
+
+  GaussMarkovBias operator+(const GaussMarkovBias& b) const {
+    return GaussMarkovBias(biasAcc_ + b.biasAcc_, biasGyro_ + b.biasGyro_,
+                           tauAcc_, tauGyro_);
+  }
+
+  GaussMarkovBias operator-(const GaussMarkovBias& b) const {
+    return GaussMarkovBias(biasAcc_ - b.biasAcc_, biasGyro_ - b.biasGyro_,
+                           tauAcc_, tauGyro_);
+  }
+
+  /// @}
+  ///
+  /// @name Manifold
+  /// @{
+  GaussMarkovBias retract(const Vector6& v) const {
+    return GaussMarkovBias(biasAcc_ + v.head<3>(), biasGyro_ + v.tail<3>(),
+                           tauAcc_, tauGyro_);
+  }
+
+  Vector6 localCoordinates(const GaussMarkovBias& other) const {
+    return other.vector() - vector();
+  }
+
+  /// @}
 };
 
 class GTSAM_EXPORT ConstantBias {
@@ -176,5 +287,9 @@ class GTSAM_EXPORT ConstantBias {
 template <>
 struct traits<imuBias::ConstantBias>
     : public internal::VectorSpace<imuBias::ConstantBias> {};
+
+template <>
+struct traits<const imuBias::GaussMarkovBias>
+    : public internal::VectorSpace<imuBias::GaussMarkovBias> {};
 
 }  // namespace gtsam
