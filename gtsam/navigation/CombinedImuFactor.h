@@ -23,16 +23,26 @@
 #pragma once
 
 /* GTSAM includes */
+#include <gtsam/navigation/ManifoldPreintegration.h>
 #include <gtsam/navigation/PreintegrationCombinedParams.h>
+#include <gtsam/navigation/TangentPreintegration.h>
 
 #include "gtsam/navigation/ImuBias.h"
 
+#include <ostream>
+
 namespace gtsam {
 
-#ifdef GTSAM_TANGENT_PREINTEGRATION
-typedef TangentPreintegration DefaultPreintegrationType;
+#ifdef GTSAM_GAUSS_MARKOV_BIAS
+typedef imuBias::GaussMarkovBias DefaultBiasType;
 #else
-typedef ManifoldPreintegration DefaultPreintegrationType;
+typedef imuBias::ConstantBias DefaultBiasType;
+#endif
+
+#ifdef GTSAM_TANGENT_PREINTEGRATION
+typedef TangentPreintegration<DefaultBiasType> DefaultPreintegrationType;
+#else
+typedef ManifoldPreintegration<DefaultBiasType> DefaultPreintegrationType;
 #endif
 
 /*
@@ -65,7 +75,7 @@ typedef ManifoldPreintegration DefaultPreintegrationType;
  *
  * @ingroup navigation
  */
-template <class PreintegrationType>
+template <class PreintegrationType, class BiasType>
 class GTSAM_EXPORT PreintegratedCombinedMeasurementsT
     : public PreintegrationType {
  public:
@@ -80,7 +90,7 @@ class GTSAM_EXPORT PreintegratedCombinedMeasurementsT
    */
   Eigen::Matrix<double, 15, 15> preintMeasCov_;
 
-  template <class PIM>
+  template <class PIM, class BIAS>
   friend class CombinedImuFactorT;
 
   template <class PIM>
@@ -100,8 +110,7 @@ class GTSAM_EXPORT PreintegratedCombinedMeasurementsT
    *  @param preintMeasCov Covariance matrix used in noise model.
    */
   PreintegratedCombinedMeasurementsT(
-      const std::shared_ptr<Params>& p,
-      const imuBias::ConstantBias& biasHat = imuBias::ConstantBias(),
+      const std::shared_ptr<Params>& p, const BiasType& biasHat = BiasType(),
       const Eigen::Matrix<double, 15, 15>& preintMeasCov =
           Eigen::Matrix<double, 15, 15>::Zero())
       : PreintegrationType(p, biasHat), preintMeasCov_(preintMeasCov) {
@@ -148,9 +157,9 @@ class GTSAM_EXPORT PreintegratedCombinedMeasurementsT
   void print(
       const std::string& s = "Preintegrated Measurements:") const override;
   /// equals
-  bool equals(
-      const PreintegratedCombinedMeasurementsT<PreintegrationType>& expected,
-      double tol = 1e-9) const;
+  bool equals(const PreintegratedCombinedMeasurementsT<PreintegrationType,
+                                                       BiasType>& expected,
+              double tol = 1e-9) const;
   /// @}
 
   /// @name Main functionality
@@ -202,7 +211,8 @@ class GTSAM_EXPORT PreintegratedCombinedMeasurementsT
 
 // For backward compatibility:
 using PreintegratedCombinedMeasurements =
-    PreintegratedCombinedMeasurementsT<DefaultPreintegrationType>;
+    PreintegratedCombinedMeasurementsT<DefaultPreintegrationType,
+                                       DefaultBiasType>;
 
 /**
  * CombinedImuFactor is a 6-ways factor involving previous state (pose and
@@ -222,16 +232,14 @@ using PreintegratedCombinedMeasurements =
  *
  * @ingroup navigation
  */
-template <class PIM = PreintegratedCombinedMeasurements>
+template <class PIM = PreintegratedCombinedMeasurements,
+          class BIAS = imuBias::ConstantBias>
 class GTSAM_EXPORT CombinedImuFactorT
-    : public NoiseModelFactorN<Pose3, Vector3, Pose3, Vector3,
-                               imuBias::ConstantBias, imuBias::ConstantBias> {
+    : public NoiseModelFactorN<Pose3, Vector3, Pose3, Vector3, BIAS, BIAS> {
  public:
  private:
-  typedef CombinedImuFactorT<PIM> This;
-  typedef NoiseModelFactorN<Pose3, Vector3, Pose3, Vector3,
-                            imuBias::ConstantBias, imuBias::ConstantBias>
-      Base;
+  typedef CombinedImuFactorT<PIM, BIAS> This;
+  typedef NoiseModelFactorN<Pose3, Vector3, Pose3, Vector3, BIAS, BIAS> Base;
 
   PIM pim_;
 
@@ -291,8 +299,7 @@ class GTSAM_EXPORT CombinedImuFactorT
   /// vector of errors
   Vector evaluateError(const Pose3& pose_i, const Vector3& vel_i,
                        const Pose3& pose_j, const Vector3& vel_j,
-                       const imuBias::ConstantBias& bias_i,
-                       const imuBias::ConstantBias& bias_j,
+                       const BIAS& bias_i, const BIAS& bias_j,
                        OptionalMatrixType H1, OptionalMatrixType H2,
                        OptionalMatrixType H3, OptionalMatrixType H4,
                        OptionalMatrixType H5,
@@ -320,18 +327,18 @@ class GTSAM_EXPORT CombinedImuFactorT
 using CombinedImuFactor = CombinedImuFactorT<>;
 
 // operator<< for CombinedImuFactorT
-template <class PIM>
+template <class PIM, class BIAS>
 GTSAM_EXPORT std::ostream& operator<<(std::ostream& os,
-                                      const CombinedImuFactorT<PIM>& f);
+                                      const CombinedImuFactorT<PIM, BIAS>& f);
 
 template <>
 struct traits<PreintegrationCombinedParams>
     : public Testable<PreintegrationCombinedParams> {};
 
-template <class PreintegrationType>
-struct traits<PreintegratedCombinedMeasurementsT<PreintegrationType>>
-    : public Testable<PreintegratedCombinedMeasurementsT<PreintegrationType>> {
-};
+template <class PreintegrationType, class BiasType>
+struct traits<PreintegratedCombinedMeasurementsT<PreintegrationType, BiasType>>
+    : public Testable<
+          PreintegratedCombinedMeasurementsT<PreintegrationType, BiasType>> {};
 
 template <class PIM>
 struct traits<CombinedImuFactorT<PIM>>
@@ -405,5 +412,271 @@ GTSAM_EXPORT std::ostream& operator<<(std::ostream& os,
 template <class PIM>
 struct traits<CombinedImuFactor2T<PIM>>
     : public Testable<CombinedImuFactor2T<PIM>> {};
+
+//==============================================================================
+// Template method implementations
+//==============================================================================
+
+// sugar for derivative blocks
+#define D_R_R(H) (H)->block<3, 3>(0, 0)
+#define D_R_t(H) (H)->block<3, 3>(0, 3)
+#define D_R_v(H) (H)->block<3, 3>(0, 6)
+#define D_t_R(H) (H)->block<3, 3>(3, 0)
+#define D_t_t(H) (H)->block<3, 3>(3, 3)
+#define D_t_v(H) (H)->block<3, 3>(3, 6)
+#define D_v_R(H) (H)->block<3, 3>(6, 0)
+#define D_v_t(H) (H)->block<3, 3>(6, 3)
+#define D_v_v(H) (H)->block<3, 3>(6, 6)
+#define D_a_a(H) (H)->block<3, 3>(9, 9)
+#define D_g_g(H) (H)->block<3, 3>(12, 12)
+
+//------------------------------------------------------------------------------
+// PreintegratedCombinedMeasurementsT implementations
+//------------------------------------------------------------------------------
+
+template <class PreintegrationType, class BiasType>
+void PreintegratedCombinedMeasurementsT<PreintegrationType, BiasType>::print(
+    const std::string& s) const {
+  PreintegrationType::print(s);
+  std::cout << "  preintMeasCov [ " << preintMeasCov_ << " ]" << std::endl;
+}
+
+template <class PreintegrationType, class BiasType>
+bool PreintegratedCombinedMeasurementsT<PreintegrationType, BiasType>::equals(
+    const PreintegratedCombinedMeasurementsT<PreintegrationType, BiasType>&
+        other,
+    double tol) const {
+  return PreintegrationType::equals(other, tol) &&
+         equal_with_abs_tol(preintMeasCov_, other.preintMeasCov_, tol);
+}
+
+template <class PreintegrationType, class BiasType>
+void PreintegratedCombinedMeasurementsT<PreintegrationType,
+                                        BiasType>::resetIntegration() {
+  PreintegrationType::resetIntegration();
+  preintMeasCov_.setZero();
+}
+
+template <class PreintegrationType, class BiasType>
+void PreintegratedCombinedMeasurementsT<PreintegrationType, BiasType>::
+    integrateMeasurement(const Vector3& measuredAcc,
+                         const Vector3& measuredOmega, double dt) {
+  if (dt <= 0) {
+    throw std::runtime_error(
+        "PreintegratedCombinedMeasurements::integrateMeasurement: dt <=0");
+  }
+
+  Matrix9 A;
+  Matrix93 B, C;
+  PreintegrationType::update(measuredAcc, measuredOmega, dt, &A, &B, &C);
+
+  Matrix3 theta_H_omega = C.topRows<3>();
+  Matrix3 pos_H_acc = B.middleRows<3>(3);
+  Matrix3 vel_H_acc = B.bottomRows<3>();
+
+  Eigen::Matrix<double, 15, 15> F;
+  F.setZero();
+  F.block<9, 9>(0, 0) = A;
+  F.block<3, 3>(0, 12) = theta_H_omega;
+  F.block<3, 3>(3, 9) = pos_H_acc;
+  F.block<3, 3>(6, 9) = vel_H_acc;
+  F.block<6, 6>(9, 9) = I_6x6;
+
+  preintMeasCov_ = F * preintMeasCov_ * F.transpose();
+
+  const Matrix3& aCov = this->p().accelerometerCovariance;
+  const Matrix3& wCov = this->p().gyroscopeCovariance;
+  const Matrix3& iCov = this->p().integrationCovariance;
+
+  Eigen::Matrix<double, 15, 15> G_measCov_Gt;
+  G_measCov_Gt.setZero(15, 15);
+
+  D_R_R(&G_measCov_Gt) =
+      (theta_H_omega * (wCov / dt) * theta_H_omega.transpose());
+  D_t_t(&G_measCov_Gt) =
+      (pos_H_acc * (aCov / dt) * pos_H_acc.transpose()) + (dt * iCov);
+  D_v_v(&G_measCov_Gt) = (vel_H_acc * (aCov / dt) * vel_H_acc.transpose());
+  D_a_a(&G_measCov_Gt) = dt * this->p().biasAccCovariance;
+  D_g_g(&G_measCov_Gt) = dt * this->p().biasOmegaCovariance;
+  D_t_v(&G_measCov_Gt) = (pos_H_acc * (aCov / dt) * vel_H_acc.transpose());
+  D_v_t(&G_measCov_Gt) = (vel_H_acc * (aCov / dt) * pos_H_acc.transpose());
+
+  preintMeasCov_.noalias() += G_measCov_Gt;
+}
+
+#undef D_R_R
+#undef D_R_t
+#undef D_R_v
+#undef D_t_R
+#undef D_t_t
+#undef D_t_v
+#undef D_v_R
+#undef D_v_t
+#undef D_v_v
+#undef D_a_a
+#undef D_g_g
+
+//------------------------------------------------------------------------------
+// CombinedImuFactorT implementations
+//------------------------------------------------------------------------------
+
+template <class PIM, class BIAS>
+void CombinedImuFactorT<PIM, BIAS>::print(
+    const std::string& s, const KeyFormatter& keyFormatter) const {
+  std::cout << (s.empty() ? s : s + "\n") << "CombinedImuFactor("
+            << keyFormatter(this->template key<1>()) << ","
+            << keyFormatter(this->template key<2>()) << ","
+            << keyFormatter(this->template key<3>()) << ","
+            << keyFormatter(this->template key<4>()) << ","
+            << keyFormatter(this->template key<5>()) << ","
+            << keyFormatter(this->template key<6>()) << ")\n";
+  pim_.print("  preintegrated measurements:");
+  this->noiseModel_->print("  noise model: ");
+}
+
+template <class PIM, class BIAS>
+bool CombinedImuFactorT<PIM, BIAS>::equals(const NonlinearFactor& other,
+                                           double tol) const {
+  const This* e = dynamic_cast<const This*>(&other);
+  return e != nullptr && Base::equals(*e, tol) && pim_.equals(e->pim_, tol);
+}
+
+template <class PIM, class BIAS>
+Vector CombinedImuFactorT<PIM, BIAS>::evaluateError(
+    const Pose3& pose_i, const Vector3& vel_i, const Pose3& pose_j,
+    const Vector3& vel_j, const BIAS& bias_i, const BIAS& bias_j,
+    OptionalMatrixType H1, OptionalMatrixType H2, OptionalMatrixType H3,
+    OptionalMatrixType H4, OptionalMatrixType H5, OptionalMatrixType H6) const {
+  Matrix6 Hbias_i, Hbias_j;
+  Vector6 fbias = traits<BIAS>::Between(bias_j, bias_i, H6 ? &Hbias_j : 0,
+                                        H5 ? &Hbias_i : 0)
+                      .vector();
+
+  Matrix96 D_r_pose_i, D_r_pose_j, D_r_bias_i;
+  Matrix93 D_r_vel_i, D_r_vel_j;
+
+  Vector9 r_Rpv = pim_.computeErrorAndJacobians(
+      pose_i, vel_i, pose_j, vel_j, bias_i, H1 ? &D_r_pose_i : 0,
+      H2 ? &D_r_vel_i : 0, H3 ? &D_r_pose_j : 0, H4 ? &D_r_vel_j : 0,
+      H5 ? &D_r_bias_i : 0);
+
+  if (H1) {
+    H1->resize(15, 6);
+    H1->block<9, 6>(0, 0) = D_r_pose_i;
+    H1->block<6, 6>(9, 0).setZero();
+  }
+  if (H2) {
+    H2->resize(15, 3);
+    H2->block<9, 3>(0, 0) = D_r_vel_i;
+    H2->block<6, 3>(9, 0).setZero();
+  }
+  if (H3) {
+    H3->resize(15, 6);
+    H3->block<9, 6>(0, 0) = D_r_pose_j;
+    H3->block<6, 6>(9, 0).setZero();
+  }
+  if (H4) {
+    H4->resize(15, 3);
+    H4->block<9, 3>(0, 0) = D_r_vel_j;
+    H4->block<6, 3>(9, 0).setZero();
+  }
+  if (H5) {
+    H5->resize(15, 6);
+    H5->block<9, 6>(0, 0) = D_r_bias_i;
+    H5->block<6, 6>(9, 0) = Hbias_i;
+  }
+  if (H6) {
+    H6->resize(15, 6);
+    H6->block<9, 6>(0, 0).setZero();
+    H6->block<6, 6>(9, 0) = Hbias_j;
+  }
+
+  Vector r(15);
+  r << r_Rpv, fbias;
+  return r;
+}
+
+template <class PIM, class BIAS>
+std::ostream& operator<<(std::ostream& os,
+                         const CombinedImuFactorT<PIM, BIAS>& f) {
+  f.preintegratedMeasurements().print("combined preintegrated measurements:\n");
+  os << "  noise model sigmas: " << f.noiseModel()->sigmas().transpose();
+  return os;
+}
+
+//------------------------------------------------------------------------------
+// CombinedImuFactor2T implementations
+//------------------------------------------------------------------------------
+
+template <class PIM>
+void CombinedImuFactor2T<PIM>::print(const std::string& s,
+                                     const KeyFormatter& keyFormatter) const {
+  std::cout << (s.empty() ? s : s + "\n") << "CombinedImuFactor2("
+            << keyFormatter(this->template key<1>()) << ","
+            << keyFormatter(this->template key<2>()) << ","
+            << keyFormatter(this->template key<3>()) << ","
+            << keyFormatter(this->template key<4>()) << ")\n";
+  pim_.print("  preintegrated measurements:");
+  this->noiseModel_->print("  noise model: ");
+}
+
+template <class PIM>
+bool CombinedImuFactor2T<PIM>::equals(const NonlinearFactor& other,
+                                      double tol) const {
+  const This* e = dynamic_cast<const This*>(&other);
+  return e != nullptr && Base::equals(*e, tol) && pim_.equals(e->pim_, tol);
+}
+
+template <class PIM>
+Vector CombinedImuFactor2T<PIM>::evaluateError(
+    const NavState& state_i, const NavState& state_j,
+    const imuBias::ConstantBias& bias_i, const imuBias::ConstantBias& bias_j,
+    OptionalMatrixType H1, OptionalMatrixType H2, OptionalMatrixType H3,
+    OptionalMatrixType H4) const {
+  Matrix6 Hbias_i, Hbias_j;
+  Vector6 fbias = traits<imuBias::ConstantBias>::Between(
+                      bias_j, bias_i, H4 ? &Hbias_j : 0, H3 ? &Hbias_i : 0)
+                      .vector();
+
+  Matrix9 D_r_state_i, D_r_state_j;
+  Matrix96 D_r_bias_i;
+
+  Vector9 r_Rpv =
+      pim_.computeError(state_i, state_j, bias_i, H1 ? &D_r_state_i : 0,
+                        H2 ? &D_r_state_j : 0, H3 ? &D_r_bias_i : 0);
+
+  if (H1) {
+    H1->resize(15, 9);
+    H1->block<9, 9>(0, 0) = D_r_state_i;
+    H1->block<6, 9>(9, 0).setZero();
+  }
+  if (H2) {
+    H2->resize(15, 9);
+    H2->block<9, 9>(0, 0) = D_r_state_j;
+    H2->block<6, 9>(9, 0).setZero();
+  }
+  if (H3) {
+    H3->resize(15, 6);
+    H3->block<9, 6>(0, 0) = D_r_bias_i;
+    H3->block<6, 6>(9, 0) = Hbias_i;
+  }
+  if (H4) {
+    H4->resize(15, 6);
+    H4->block<9, 6>(0, 0).setZero();
+    H4->block<6, 6>(9, 0) = Hbias_j;
+  }
+
+  Vector r(15);
+  r << r_Rpv, fbias;
+  return r;
+}
+
+template <class PIM>
+std::ostream& operator<<(std::ostream& os, const CombinedImuFactor2T<PIM>& f) {
+  f.preintegratedMeasurements().print("combined preintegrated measurements:\n");
+  os << "  noise model sigmas: " << f.noiseModel()->sigmas().transpose();
+  return os;
+}
+
 }  // namespace gtsam
 //

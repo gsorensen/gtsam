@@ -21,19 +21,17 @@
 
 #include "ManifoldPreintegration.h"
 
+#include "gtsam/navigation/ImuBias.h"
+
 using namespace std;
 
 namespace gtsam {
 
 //------------------------------------------------------------------------------
-ManifoldPreintegration::ManifoldPreintegration(
-    const std::shared_ptr<Params>& p, const Bias& biasHat) :
-    PreintegrationBase(p, biasHat) {
-  resetIntegration();
-}
 
 //------------------------------------------------------------------------------
-void ManifoldPreintegration::resetIntegration() {
+template <typename Bias>
+void ManifoldPreintegration<Bias>::resetIntegration() {
   deltaTij_ = 0.0;
   deltaXij_ = NavState();
   delRdelBiasOmega_.setZero();
@@ -44,31 +42,41 @@ void ManifoldPreintegration::resetIntegration() {
 }
 
 //------------------------------------------------------------------------------
-bool ManifoldPreintegration::equals(const ManifoldPreintegration& other,
-    double tol) const {
-  return p_->equals(*other.p_, tol) && std::abs(deltaTij_ - other.deltaTij_) < tol
-      && biasHat_.equals(other.biasHat_, tol)
-      && deltaXij_.equals(other.deltaXij_, tol)
-      && equal_with_abs_tol(delRdelBiasOmega_, other.delRdelBiasOmega_, tol)
-      && equal_with_abs_tol(delPdelBiasAcc_, other.delPdelBiasAcc_, tol)
-      && equal_with_abs_tol(delPdelBiasOmega_, other.delPdelBiasOmega_, tol)
-      && equal_with_abs_tol(delVdelBiasAcc_, other.delVdelBiasAcc_, tol)
-      && equal_with_abs_tol(delVdelBiasOmega_, other.delVdelBiasOmega_, tol);
+template <typename Bias>
+bool ManifoldPreintegration<Bias>::equals(const ManifoldPreintegration& other,
+                                          double tol) const {
+  return p_->equals(*other.p_, tol) &&
+         std::abs(deltaTij_ - other.deltaTij_) < tol &&
+         biasHat_.equals(other.biasHat_, tol) &&
+         deltaXij_.equals(other.deltaXij_, tol) &&
+         equal_with_abs_tol(delRdelBiasOmega_, other.delRdelBiasOmega_, tol) &&
+         equal_with_abs_tol(delPdelBiasAcc_, other.delPdelBiasAcc_, tol) &&
+         equal_with_abs_tol(delPdelBiasOmega_, other.delPdelBiasOmega_, tol) &&
+         equal_with_abs_tol(delVdelBiasAcc_, other.delVdelBiasAcc_, tol) &&
+         equal_with_abs_tol(delVdelBiasOmega_, other.delVdelBiasOmega_, tol);
 }
 
 //------------------------------------------------------------------------------
-void ManifoldPreintegration::update(const Vector3& measuredAcc,
-    const Vector3& measuredOmega, const double dt, Matrix9* A, Matrix93* B,
-    Matrix93* C) {
-
+template <typename Bias>
+void ManifoldPreintegration<Bias>::update(const Vector3& measuredAcc,
+                                          const Vector3& measuredOmega,
+                                          const double dt, Matrix9* A,
+                                          Matrix93* B, Matrix93* C) {
   // Correct for bias in the sensor frame
-  Vector3 acc = biasHat_.correctAccelerometer(measuredAcc);
-  Vector3 omega = biasHat_.correctGyroscope(measuredOmega);
+  Vector3 acc, omega;
+  if constexpr (std::is_same_v<Bias, imuBias::GaussMarkovBias>) {
+    // For ConstantBias, we can use the more efficient correction functions
+    acc = biasHat_.correctAccelerometer(measuredAcc, dt);
+    omega = biasHat_.correctGyroscope(measuredOmega, dt);
+  } else {
+    acc = biasHat_.correctAccelerometer(measuredAcc);
+    omega = biasHat_.correctGyroscope(measuredOmega);
+  }
 
   // Possibly correct for sensor pose
   Matrix3 D_correctedAcc_acc, D_correctedAcc_omega, D_correctedOmega_omega;
   if (p().body_P_sensor) {
-    std::tie(acc, omega) = correctMeasurementsBySensorPose(
+    std::tie(acc, omega) = this->correctMeasurementsBySensorPose(
         acc, omega, D_correctedAcc_acc, D_correctedAcc_omega,
         D_correctedOmega_omega);
   }
@@ -78,14 +86,14 @@ void ManifoldPreintegration::update(const Vector3& measuredAcc,
 
   // Do update
   deltaTij_ += dt;
-  deltaXij_ = deltaXij_.update(acc, omega, dt, A, B, C); // functional
+  deltaXij_ = deltaXij_.update(acc, omega, dt, A, B, C);  // functional
 
   if (p().body_P_sensor) {
     // More complicated derivatives in case of non-trivial sensor pose
     *C *= D_correctedOmega_omega;
     if (!p().body_P_sensor->translation().isZero())
       *C += *B * D_correctedAcc_omega;
-    *B *= D_correctedAcc_acc; // NOTE(frank): needs to be last
+    *B *= D_correctedAcc_acc;  // NOTE(frank): needs to be last
   }
 
   // Update Jacobians
@@ -96,39 +104,53 @@ void ManifoldPreintegration::update(const Vector3& measuredAcc,
 
   const Vector3 integratedOmega = omega * dt;
   Matrix3 D_incrR_integratedOmega;
-  const Rot3 incrR = Rot3::Expmap(integratedOmega, D_incrR_integratedOmega); // expensive !!
+  const Rot3 incrR =
+      Rot3::Expmap(integratedOmega, D_incrR_integratedOmega);  // expensive !!
   const Matrix3 incrRt = incrR.transpose();
-  delRdelBiasOmega_ = incrRt * delRdelBiasOmega_ - D_incrR_integratedOmega * dt;
 
   double dt22 = 0.5 * dt * dt;
-  const Matrix3 dRij = oldRij.matrix(); // expensive
-  delPdelBiasAcc_ += delVdelBiasAcc_ * dt - dt22 * dRij;
-  delPdelBiasOmega_ += dt * delVdelBiasOmega_ + dt22 * D_acc_biasOmega;
-  delVdelBiasAcc_ += -dRij * dt;
-  delVdelBiasOmega_ += D_acc_biasOmega * dt;
+  const Matrix3 dRij = oldRij.matrix();  // expensive
+
+  // For ConstantBias: acc_H_biasAcc = -I, omega_H_biasOmega = -I (beta = 1)
+  // For GaussMarkovBias: acc_H_biasAcc = -beta_acc * I, omega_H_biasOmega = -beta_omega * I
+  if constexpr (std::is_same_v<Bias, imuBias::GaussMarkovBias>) {
+    const double beta_acc = std::exp(-dt / biasHat_.tauAcc());
+    const double beta_omega = std::exp(-dt / biasHat_.tauGyro());
+    delRdelBiasOmega_ = incrRt * delRdelBiasOmega_ - beta_omega * D_incrR_integratedOmega * dt;
+    delPdelBiasAcc_ += delVdelBiasAcc_ * dt - beta_acc * dt22 * dRij;
+    delPdelBiasOmega_ += dt * delVdelBiasOmega_ + dt22 * D_acc_biasOmega;
+    delVdelBiasAcc_ += -beta_acc * dRij * dt;
+    delVdelBiasOmega_ += D_acc_biasOmega * dt;
+  } else {
+    delRdelBiasOmega_ = incrRt * delRdelBiasOmega_ - D_incrR_integratedOmega * dt;
+    delPdelBiasAcc_ += delVdelBiasAcc_ * dt - dt22 * dRij;
+    delPdelBiasOmega_ += dt * delVdelBiasOmega_ + dt22 * D_acc_biasOmega;
+    delVdelBiasAcc_ += -dRij * dt;
+    delVdelBiasOmega_ += D_acc_biasOmega * dt;
+  }
 }
 
 //------------------------------------------------------------------------------
-Vector9 ManifoldPreintegration::biasCorrectedDelta(
-    const imuBias::ConstantBias& bias_i, OptionalJacobian<9, 6> H) const {
+template <typename Bias>
+Vector9 ManifoldPreintegration<Bias>::biasCorrectedDelta(
+    const Bias& bias_i, OptionalJacobian<9, 6> H) const {
   // Correct deltaRij, derivative is delRdelBiasOmega_
-  const imuBias::ConstantBias biasIncr = bias_i - biasHat_;
+  const Bias biasIncr = bias_i - biasHat_;
   Matrix3 D_correctedRij_bias;
   const Vector3 biasInducedOmega = delRdelBiasOmega_ * biasIncr.gyroscope();
-  const Rot3 correctedRij = deltaRij().expmap(biasInducedOmega, {},
-      H ? &D_correctedRij_bias : 0);
-  if (H)
-    D_correctedRij_bias *= delRdelBiasOmega_;
+  const Rot3 correctedRij =
+      deltaRij().expmap(biasInducedOmega, {}, H ? &D_correctedRij_bias : 0);
+  if (H) D_correctedRij_bias *= delRdelBiasOmega_;
 
   Vector9 xi;
   Matrix3 D_dR_correctedRij;
   // TODO(frank): could line below be simplified? It is equivalent to
   //   LogMap(deltaRij_.compose(Expmap(biasInducedOmega)))
   NavState::dR(xi) = Rot3::Logmap(correctedRij, H ? &D_dR_correctedRij : 0);
-  NavState::dP(xi) = deltaPij() + delPdelBiasAcc_ * biasIncr.accelerometer()
-      + delPdelBiasOmega_ * biasIncr.gyroscope();
-  NavState::dV(xi) = deltaVij() + delVdelBiasAcc_ * biasIncr.accelerometer()
-      + delVdelBiasOmega_ * biasIncr.gyroscope();
+  NavState::dP(xi) = deltaPij() + delPdelBiasAcc_ * biasIncr.accelerometer() +
+                     delPdelBiasOmega_ * biasIncr.gyroscope();
+  NavState::dV(xi) = deltaVij() + delVdelBiasAcc_ * biasIncr.accelerometer() +
+                     delVdelBiasOmega_ * biasIncr.gyroscope();
 
   if (H) {
     Matrix36 D_dR_bias, D_dP_bias, D_dV_bias;
@@ -142,4 +164,7 @@ Vector9 ManifoldPreintegration::biasCorrectedDelta(
 
 //------------------------------------------------------------------------------
 
-}// namespace gtsam
+}  // namespace gtsam
+
+// Explicit instantiation
+template class gtsam::ManifoldPreintegration<gtsam::imuBias::ConstantBias>;

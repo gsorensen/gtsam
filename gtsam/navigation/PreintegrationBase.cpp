@@ -25,17 +25,21 @@
 
 #include <cassert>
 
+#include "gtsam/navigation/ImuBias.h"
+
 using namespace std;
 
 namespace gtsam {
 
 //------------------------------------------------------------------------------
-PreintegrationBase::PreintegrationBase(const std::shared_ptr<Params>& p,
-                                       const Bias& biasHat)
-    : p_(p), biasHat_(biasHat), deltaTij_(0.0) {}
+// template <typename Bias>
+// PreintegrationBase::PreintegrationBase(const std::shared_ptr<Params>& p,
+//                                             const Bias& biasHat)
+//    : p_(p), biasHat_(biasHat), deltaTij_(0.0) {}
 
 //------------------------------------------------------------------------------
-ostream& operator<<(ostream& os, const PreintegrationBase& pim) {
+template <typename Bias>
+ostream& operator<<(ostream& os, const PreintegrationBase<Bias>& pim) {
   os << "    deltaTij = " << pim.deltaTij_ << endl;
   os << "    deltaRij.ypr = (" << pim.deltaRij().ypr().transpose() << ")"
      << endl;
@@ -47,18 +51,22 @@ ostream& operator<<(ostream& os, const PreintegrationBase& pim) {
 }
 
 //------------------------------------------------------------------------------
-void PreintegrationBase::print(const string& s) const {
+template <typename Bias>
+void PreintegrationBase<Bias>::print(const string& s) const {
   cout << (s.empty() ? s : s + "\n") << *this << endl;
 }
 
 //------------------------------------------------------------------------------
-void PreintegrationBase::resetIntegrationAndSetBias(const Bias& biasHat) {
+template <typename Bias>
+void PreintegrationBase<Bias>::resetIntegrationAndSetBias(const Bias& biasHat) {
   biasHat_ = biasHat;
   resetIntegration();
 }
 
 //------------------------------------------------------------------------------
-pair<Vector3, Vector3> PreintegrationBase::correctMeasurementsBySensorPose(
+template <typename Bias>
+pair<Vector3, Vector3>
+PreintegrationBase<Bias>::correctMeasurementsBySensorPose(
     const Vector3& unbiasedAcc, const Vector3& unbiasedOmega,
     OptionalJacobian<3, 3> correctedAcc_H_unbiasedAcc,
     OptionalJacobian<3, 3> correctedAcc_H_unbiasedOmega,
@@ -106,9 +114,9 @@ pair<Vector3, Vector3> PreintegrationBase::correctMeasurementsBySensorPose(
 }
 
 //------------------------------------------------------------------------------
-void PreintegrationBase::integrateMeasurement(const Vector3& measuredAcc,
-                                              const Vector3& measuredOmega,
-                                              double dt) {
+template <typename Bias>
+void PreintegrationBase<Bias>::integrateMeasurement(
+    const Vector3& measuredAcc, const Vector3& measuredOmega, double dt) {
   // NOTE(frank): integrateMeasurement always needs to compute the derivatives,
   // even when not of interest to the caller. Provide scratch space here.
   Matrix9 A;
@@ -117,10 +125,11 @@ void PreintegrationBase::integrateMeasurement(const Vector3& measuredAcc,
 }
 
 //------------------------------------------------------------------------------
-NavState PreintegrationBase::predict(const NavState& state_i,
-                                     const imuBias::ConstantBias& bias_i,
-                                     OptionalJacobian<9, 9> H1,
-                                     OptionalJacobian<9, 6> H2) const {
+template <typename Bias>
+NavState PreintegrationBase<Bias>::predict(const NavState& state_i,
+                                           const Bias& bias_i,
+                                           OptionalJacobian<9, 9> H1,
+                                           OptionalJacobian<9, 6> H2) const {
   Matrix96 D_biasCorrected_bias;
   Vector9 biasCorrected =
       biasCorrectedDelta(bias_i, H2 ? &D_biasCorrected_bias : nullptr);
@@ -142,12 +151,11 @@ NavState PreintegrationBase::predict(const NavState& state_i,
 }
 
 //------------------------------------------------------------------------------
-Vector9 PreintegrationBase::computeError(const NavState& state_i,
-                                         const NavState& state_j,
-                                         const imuBias::ConstantBias& bias_i,
-                                         OptionalJacobian<9, 9> H1,
-                                         OptionalJacobian<9, 9> H2,
-                                         OptionalJacobian<9, 6> H3) const {
+template <typename Bias>
+Vector9 PreintegrationBase<Bias>::computeError(
+    const NavState& state_i, const NavState& state_j, const Bias& bias_i,
+    OptionalJacobian<9, 9> H1, OptionalJacobian<9, 9> H2,
+    OptionalJacobian<9, 6> H3) const {
   // Predict state at time j
   Matrix9 D_predict_state_i;
   Matrix96 D_predict_bias_i;
@@ -168,12 +176,12 @@ Vector9 PreintegrationBase::computeError(const NavState& state_i,
 }
 
 //------------------------------------------------------------------------------
-Vector9 PreintegrationBase::computeErrorAndJacobians(
+template <typename Bias>
+Vector9 PreintegrationBase<Bias>::computeErrorAndJacobians(
     const Pose3& pose_i, const Vector3& vel_i, const Pose3& pose_j,
-    const Vector3& vel_j, const imuBias::ConstantBias& bias_i,
-    OptionalJacobian<9, 6> H1, OptionalJacobian<9, 3> H2,
-    OptionalJacobian<9, 6> H3, OptionalJacobian<9, 3> H4,
-    OptionalJacobian<9, 6> H5) const {
+    const Vector3& vel_j, const Bias& bias_i, OptionalJacobian<9, 6> H1,
+    OptionalJacobian<9, 3> H2, OptionalJacobian<9, 6> H3,
+    OptionalJacobian<9, 3> H4, OptionalJacobian<9, 6> H5) const {
   // Note that derivative of constructors below is not identity for velocity,
   // but a 9*3 matrix == Z_3x3, Z_3x3, state.R().transpose()
   NavState state_i(pose_i, vel_i);
@@ -202,3 +210,13 @@ Vector9 PreintegrationBase::computeErrorAndJacobians(
 //------------------------------------------------------------------------------
 
 }  // namespace gtsam
+
+// Explicit instantiation
+template class gtsam::PreintegrationBase<gtsam::imuBias::ConstantBias>;
+template class gtsam::PreintegrationBase<gtsam::imuBias::GaussMarkovBias>;
+template std::ostream& gtsam::operator<< <gtsam::imuBias::ConstantBias>(
+    std::ostream& os,
+    const gtsam::PreintegrationBase<gtsam::imuBias::ConstantBias>& pim);
+template std::ostream& gtsam::operator<< <gtsam::imuBias::GaussMarkovBias>(
+    std::ostream& os,
+    const gtsam::PreintegrationBase<gtsam::imuBias::GaussMarkovBias>& pim);
