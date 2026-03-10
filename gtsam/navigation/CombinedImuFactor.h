@@ -29,11 +29,19 @@
 
 namespace gtsam {
 
-#ifdef GTSAM_TANGENT_PREINTEGRATION
-typedef TangentPreintegration DefaultPreintegrationType;
+#ifdef GTSAM_GAUSS_MARKOV_BIAS
+typedef imuBias::GaussMarkovBias DefaultBiasType;
 #else
-typedef ManifoldPreintegration DefaultPreintegrationType;
+typedef imuBias::ConstantBias DefaultBiasType;
 #endif
+
+#ifdef GTSAM_TANGENT_PREINTEGRATION
+typedef TangentPreintegration<DefaultBiasType> DefaultPreintegrationType;
+#else
+typedef ManifoldPreintegration<DefaultBiasType> DefaultPreintegrationType;
+#endif
+
+typedef imuBias::ConstantBias DefaultBiasType;
 
 /*
  * If you are using the factor, please cite:
@@ -65,7 +73,7 @@ typedef ManifoldPreintegration DefaultPreintegrationType;
  *
  * @ingroup navigation
  */
-template <class PreintegrationType>
+template <class PreintegrationType, class BiasType = imuBias::ConstantBias>
 class GTSAM_EXPORT PreintegratedCombinedMeasurementsT
     : public PreintegrationType {
  public:
@@ -80,7 +88,7 @@ class GTSAM_EXPORT PreintegratedCombinedMeasurementsT
    */
   Eigen::Matrix<double, 15, 15> preintMeasCov_;
 
-  template <class PIM>
+  template <class PIM, class BIAS>
   friend class CombinedImuFactorT;
 
   template <class PIM>
@@ -100,8 +108,7 @@ class GTSAM_EXPORT PreintegratedCombinedMeasurementsT
    *  @param preintMeasCov Covariance matrix used in noise model.
    */
   PreintegratedCombinedMeasurementsT(
-      const std::shared_ptr<Params>& p,
-      const imuBias::ConstantBias& biasHat = imuBias::ConstantBias(),
+      const std::shared_ptr<Params>& p, const BiasType& biasHat = BiasType(),
       const Eigen::Matrix<double, 15, 15>& preintMeasCov =
           Eigen::Matrix<double, 15, 15>::Zero())
       : PreintegrationType(p, biasHat), preintMeasCov_(preintMeasCov) {
@@ -222,16 +229,14 @@ using PreintegratedCombinedMeasurements =
  *
  * @ingroup navigation
  */
-template <class PIM = PreintegratedCombinedMeasurements>
+template <class PIM = PreintegratedCombinedMeasurements,
+          class BIAS = imuBias::ConstantBias>
 class GTSAM_EXPORT CombinedImuFactorT
-    : public NoiseModelFactorN<Pose3, Vector3, Pose3, Vector3,
-                               imuBias::ConstantBias, imuBias::ConstantBias> {
+    : public NoiseModelFactorN<Pose3, Vector3, Pose3, Vector3, BIAS, BIAS> {
  public:
  private:
-  typedef CombinedImuFactorT<PIM> This;
-  typedef NoiseModelFactorN<Pose3, Vector3, Pose3, Vector3,
-                            imuBias::ConstantBias, imuBias::ConstantBias>
-      Base;
+  typedef CombinedImuFactorT<PIM, BIAS> This;
+  typedef NoiseModelFactorN<Pose3, Vector3, Pose3, Vector3, BIAS, BIAS> Base;
 
   PIM pim_;
 
@@ -291,8 +296,7 @@ class GTSAM_EXPORT CombinedImuFactorT
   /// vector of errors
   Vector evaluateError(const Pose3& pose_i, const Vector3& vel_i,
                        const Pose3& pose_j, const Vector3& vel_j,
-                       const imuBias::ConstantBias& bias_i,
-                       const imuBias::ConstantBias& bias_j,
+                       const BIAS& bias_i, const BIAS& bias_j,
                        OptionalMatrixType H1, OptionalMatrixType H2,
                        OptionalMatrixType H3, OptionalMatrixType H4,
                        OptionalMatrixType H5,
@@ -320,9 +324,9 @@ class GTSAM_EXPORT CombinedImuFactorT
 using CombinedImuFactor = CombinedImuFactorT<>;
 
 // operator<< for CombinedImuFactorT
-template <class PIM>
+template <class PIM, class BIAS>
 GTSAM_EXPORT std::ostream& operator<<(std::ostream& os,
-                                      const CombinedImuFactorT<PIM>& f);
+                                      const CombinedImuFactorT<PIM, BIAS>& f);
 
 template <>
 struct traits<PreintegrationCombinedParams>

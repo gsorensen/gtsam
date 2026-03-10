@@ -55,16 +55,16 @@ bool PreintegrationCombinedParams::equals(
 //------------------------------------------------------------------------------
 // Inner class PreintegratedCombinedMeasurementsT
 //------------------------------------------------------------------------------
-template <class PreintegrationType>
-void PreintegratedCombinedMeasurementsT<PreintegrationType>::print(
+template <class PreintegrationType, class BiasType>
+void PreintegratedCombinedMeasurementsT<PreintegrationType, BiasType>::print(
     const string& s) const {
   PreintegrationType::print(s);
   cout << "  preintMeasCov [ " << preintMeasCov_ << " ]" << endl;
 }
 
 //------------------------------------------------------------------------------
-template <class PreintegrationType>
-bool PreintegratedCombinedMeasurementsT<PreintegrationType>::equals(
+template <class PreintegrationType, class BiasType>
+bool PreintegratedCombinedMeasurementsT<PreintegrationType, BiasType>::equals(
     const PreintegratedCombinedMeasurementsT<PreintegrationType>& other,
     double tol) const {
   return PreintegrationType::equals(other, tol) &&
@@ -72,9 +72,9 @@ bool PreintegratedCombinedMeasurementsT<PreintegrationType>::equals(
 }
 
 //------------------------------------------------------------------------------
-template <class PreintegrationType>
-void PreintegratedCombinedMeasurementsT<
-    PreintegrationType>::resetIntegration() {
+template <class PreintegrationType, class BiasType>
+void PreintegratedCombinedMeasurementsT<PreintegrationType,
+                                        BiasType>::resetIntegration() {
   // Base class method to reset the preintegrated measurements
   PreintegrationType::resetIntegration();
   preintMeasCov_.setZero();
@@ -95,11 +95,10 @@ void PreintegratedCombinedMeasurementsT<
 #define D_g_g(H) (H)->block<3, 3>(12, 12)
 
 //------------------------------------------------------------------------------
-template <class PreintegrationType>
-void PreintegratedCombinedMeasurementsT<
-    PreintegrationType>::integrateMeasurement(const Vector3& measuredAcc,
-                                              const Vector3& measuredOmega,
-                                              double dt) {
+template <class PreintegrationType, class BiasType>
+void PreintegratedCombinedMeasurementsT<PreintegrationType, BiasType>::
+    integrateMeasurement(const Vector3& measuredAcc,
+                         const Vector3& measuredOmega, double dt) {
   if (dt <= 0) {
     throw std::runtime_error(
         "PreintegratedCombinedMeasurements::integrateMeasurement: dt <=0");
@@ -166,9 +165,9 @@ void PreintegratedCombinedMeasurementsT<
 //------------------------------------------------------------------------------
 // CombinedImuFactorT methods
 //------------------------------------------------------------------------------
-template <class PIM>
-void CombinedImuFactorT<PIM>::print(const string& s,
-                                    const KeyFormatter& keyFormatter) const {
+template <class PIM, class BIAS>
+void CombinedImuFactorT<PIM, BIAS>::print(
+    const string& s, const KeyFormatter& keyFormatter) const {
   cout << (s.empty() ? s : s + "\n") << "CombinedImuFactor("
        << keyFormatter(this->template key<1>()) << ","
        << keyFormatter(this->template key<2>()) << ","
@@ -181,33 +180,34 @@ void CombinedImuFactorT<PIM>::print(const string& s,
 }
 
 //------------------------------------------------------------------------------
-template <class PIM>
-bool CombinedImuFactorT<PIM>::equals(const NonlinearFactor& other,
-                                     double tol) const {
+template <class PIM, class BIAS>
+bool CombinedImuFactorT<PIM, BIAS>::equals(const NonlinearFactor& other,
+                                           double tol) const {
   const This* e = dynamic_cast<const This*>(&other);
   return e != nullptr && Base::equals(*e, tol) && pim_.equals(e->pim_, tol);
 }
 
 //------------------------------------------------------------------------------
-template <class PIM>
-Vector CombinedImuFactorT<PIM>::evaluateError(
+template <class PIM, class BIAS>
+Vector CombinedImuFactorT<PIM, BIAS>::evaluateError(
     const Pose3& pose_i, const Vector3& vel_i, const Pose3& pose_j,
-    const Vector3& vel_j, const imuBias::ConstantBias& bias_i,
-    const imuBias::ConstantBias& bias_j, OptionalMatrixType H1,
-    OptionalMatrixType H2, OptionalMatrixType H3, OptionalMatrixType H4,
-    OptionalMatrixType H5, OptionalMatrixType H6) const {
-  // error wrt bias evolution model (random walk)
+    const Vector3& vel_j, const BIAS& bias_i, const BIAS& bias_j,
+    OptionalMatrixType H1, OptionalMatrixType H2, OptionalMatrixType H3,
+    OptionalMatrixType H4, OptionalMatrixType H5, OptionalMatrixType H6) const {
+  // error wrt bias evolution model (templated)
   Matrix6 Hbias_i, Hbias_j;
-  Vector6 fbias = traits<imuBias::ConstantBias>::Between(bias_j, bias_i,
-      H6 ? &Hbias_j : 0, H5 ? &Hbias_i : 0).vector();
+  Vector6 fbias = traits<BIAS>::Between(bias_j, bias_i, H6 ? &Hbias_j : 0,
+                                        H5 ? &Hbias_i : 0)
+                      .vector();
 
   Matrix96 D_r_pose_i, D_r_pose_j, D_r_bias_i;
   Matrix93 D_r_vel_i, D_r_vel_j;
 
   // error wrt preintegrated measurements
-  Vector9 r_Rpv = pim_.computeErrorAndJacobians(pose_i, vel_i, pose_j, vel_j,
-      bias_i, H1 ? &D_r_pose_i : 0, H2 ? &D_r_vel_i : 0, H3 ? &D_r_pose_j : 0,
-      H4 ? &D_r_vel_j : 0, H5 ? &D_r_bias_i : 0);
+  Vector9 r_Rpv = pim_.computeErrorAndJacobians(
+      pose_i, vel_i, pose_j, vel_j, bias_i, H1 ? &D_r_pose_i : 0,
+      H2 ? &D_r_vel_i : 0, H3 ? &D_r_pose_j : 0, H4 ? &D_r_vel_j : 0,
+      H5 ? &D_r_bias_i : 0);
 
   // if we need the jacobians
   if (H1) {
@@ -249,7 +249,7 @@ Vector CombinedImuFactorT<PIM>::evaluateError(
 
   // overall error
   Vector r(15);
-  r << r_Rpv, fbias; // vector of size 15
+  r << r_Rpv, fbias;  // vector of size 15
   return r;
 }
 
@@ -348,6 +348,7 @@ std::ostream& operator<<(std::ostream& os, const CombinedImuFactor2T<PIM>& f) {
 //------------------------------------------------------------------------------
 // Explicit instantiations
 //------------------------------------------------------------------------------
+
 template class GTSAM_EXPORT
     PreintegratedCombinedMeasurementsT<ManifoldPreintegration>;
 template class GTSAM_EXPORT
