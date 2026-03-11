@@ -28,15 +28,17 @@ namespace gtsam {
 template <typename Bias = imuBias::ConstantBias>
 class GTSAM_EXPORT TangentPreintegration : public PreintegrationBase<Bias> {
  protected:
-  using Params = typename PreintegrationBase<Bias>::Params;
   using PreintegrationBase<Bias>::biasHat_;
   using PreintegrationBase<Bias>::deltaTij_;
   using PreintegrationBase<Bias>::p_;
   using PreintegrationBase<Bias>::p;
-  using PreintegrationBase<Bias>::correctMeasurementsBySensorPose;
+
+ public:
+  using Params = typename PreintegrationBase<Bias>::Params;
   using PreintegrationBase<Bias>::deltaTij;
   using PreintegrationBase<Bias>::params;
   using PreintegrationBase<Bias>::biasHat;
+  using PreintegrationBase<Bias>::correctMeasurementsBySensorPose;
   /**
    * Preintegrated navigation state, as a 9D vector on tangent space at frame i
    * Order is: theta, position, velocity
@@ -60,7 +62,8 @@ class GTSAM_EXPORT TangentPreintegration : public PreintegrationBase<Bias> {
    *  @param bias Current estimate of acceleration and rotation rate biases
    */
 
-  TangentPreintegration(const std::shared_ptr<Params>& p, const Bias& biasHat)
+  TangentPreintegration(const std::shared_ptr<Params>& p,
+                        const Bias& biasHat = Bias())
       : PreintegrationBase<Bias>(p, biasHat) {
     resetIntegration();
   }

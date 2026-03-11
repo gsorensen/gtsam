@@ -21,6 +21,8 @@
 
 #include "ManifoldPreintegration.h"
 
+#include "gtsam/navigation/ImuBias.h"
+
 using namespace std;
 
 namespace gtsam {
@@ -61,13 +63,20 @@ void ManifoldPreintegration<Bias>::update(const Vector3& measuredAcc,
                                           const double dt, Matrix9* A,
                                           Matrix93* B, Matrix93* C) {
   // Correct for bias in the sensor frame
-  Vector3 acc = biasHat_.correctAccelerometer(measuredAcc);
-  Vector3 omega = biasHat_.correctGyroscope(measuredOmega);
+  Vector3 acc, omega;
+  if constexpr (std::is_same_v<Bias, imuBias::GaussMarkovBias>) {
+    // For ConstantBias, we can use the more efficient correction functions
+    acc = biasHat_.correctAccelerometer(measuredAcc, dt);
+    omega = biasHat_.correctGyroscope(measuredOmega, dt);
+  } else {
+    acc = biasHat_.correctAccelerometer(measuredAcc);
+    omega = biasHat_.correctGyroscope(measuredOmega);
+  }
 
   // Possibly correct for sensor pose
   Matrix3 D_correctedAcc_acc, D_correctedAcc_omega, D_correctedOmega_omega;
   if (p().body_P_sensor) {
-    std::tie(acc, omega) = correctMeasurementsBySensorPose(
+    std::tie(acc, omega) = this->correctMeasurementsBySensorPose(
         acc, omega, D_correctedAcc_acc, D_correctedAcc_omega,
         D_correctedOmega_omega);
   }
@@ -98,14 +107,27 @@ void ManifoldPreintegration<Bias>::update(const Vector3& measuredAcc,
   const Rot3 incrR =
       Rot3::Expmap(integratedOmega, D_incrR_integratedOmega);  // expensive !!
   const Matrix3 incrRt = incrR.transpose();
-  delRdelBiasOmega_ = incrRt * delRdelBiasOmega_ - D_incrR_integratedOmega * dt;
 
   double dt22 = 0.5 * dt * dt;
   const Matrix3 dRij = oldRij.matrix();  // expensive
-  delPdelBiasAcc_ += delVdelBiasAcc_ * dt - dt22 * dRij;
-  delPdelBiasOmega_ += dt * delVdelBiasOmega_ + dt22 * D_acc_biasOmega;
-  delVdelBiasAcc_ += -dRij * dt;
-  delVdelBiasOmega_ += D_acc_biasOmega * dt;
+
+  // For ConstantBias: acc_H_biasAcc = -I, omega_H_biasOmega = -I (beta = 1)
+  // For GaussMarkovBias: acc_H_biasAcc = -beta_acc * I, omega_H_biasOmega = -beta_omega * I
+  if constexpr (std::is_same_v<Bias, imuBias::GaussMarkovBias>) {
+    const double beta_acc = std::exp(-dt / biasHat_.tauAcc());
+    const double beta_omega = std::exp(-dt / biasHat_.tauGyro());
+    delRdelBiasOmega_ = incrRt * delRdelBiasOmega_ - beta_omega * D_incrR_integratedOmega * dt;
+    delPdelBiasAcc_ += delVdelBiasAcc_ * dt - beta_acc * dt22 * dRij;
+    delPdelBiasOmega_ += dt * delVdelBiasOmega_ + dt22 * D_acc_biasOmega;
+    delVdelBiasAcc_ += -beta_acc * dRij * dt;
+    delVdelBiasOmega_ += D_acc_biasOmega * dt;
+  } else {
+    delRdelBiasOmega_ = incrRt * delRdelBiasOmega_ - D_incrR_integratedOmega * dt;
+    delPdelBiasAcc_ += delVdelBiasAcc_ * dt - dt22 * dRij;
+    delPdelBiasOmega_ += dt * delVdelBiasOmega_ + dt22 * D_acc_biasOmega;
+    delVdelBiasAcc_ += -dRij * dt;
+    delVdelBiasOmega_ += D_acc_biasOmega * dt;
+  }
 }
 
 //------------------------------------------------------------------------------
@@ -143,3 +165,6 @@ Vector9 ManifoldPreintegration<Bias>::biasCorrectedDelta(
 //------------------------------------------------------------------------------
 
 }  // namespace gtsam
+
+// Explicit instantiation
+template class gtsam::ManifoldPreintegration<gtsam::imuBias::ConstantBias>;

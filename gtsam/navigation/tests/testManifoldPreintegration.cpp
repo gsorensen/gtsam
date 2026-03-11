@@ -33,27 +33,27 @@ TEST(ManifoldPreintegration, BiasCorrectionJacobians) {
 
   std::function<Rot3(const Vector3&, const Vector3&)> deltaRij =
       [&](const Vector3& a, const Vector3& w) {
-        ManifoldPreintegration pim(testing::Params(), Bias(a, w));
+        ManifoldPreintegration<> pim(testing::Params(), Bias(a, w));
         testing::integrateMeasurements(measurements, &pim);
         return pim.deltaRij();
       };
 
   std::function<Point3(const Vector3&, const Vector3&)> deltaPij =
       [&](const Vector3& a, const Vector3& w) {
-        ManifoldPreintegration pim(testing::Params(), Bias(a, w));
+        ManifoldPreintegration<> pim(testing::Params(), Bias(a, w));
         testing::integrateMeasurements(measurements, &pim);
         return pim.deltaPij();
       };
 
   std::function<Vector3(const Vector3&, const Vector3&)> deltaVij =
       [&](const Vector3& a, const Vector3& w) {
-        ManifoldPreintegration pim(testing::Params(), Bias(a, w));
+        ManifoldPreintegration<> pim(testing::Params(), Bias(a, w));
         testing::integrateMeasurements(measurements, &pim);
         return pim.deltaVij();
       };
 
   // Actual pre-integrated values
-  ManifoldPreintegration pim(testing::Params());
+  ManifoldPreintegration<> pim(testing::Params());
   testing::integrateMeasurements(measurements, &pim);
 
   EXPECT(
@@ -80,7 +80,7 @@ TEST(ManifoldPreintegration, BiasCorrectionJacobians) {
 
 /* ************************************************************************* */
 TEST(ManifoldPreintegration, computeError) {
-  ManifoldPreintegration pim(testing::Params());
+  ManifoldPreintegration<> pim(testing::Params());
   NavState x1, x2;
   imuBias::ConstantBias bias;
   Matrix9 aH1, aH2;
@@ -88,7 +88,7 @@ TEST(ManifoldPreintegration, computeError) {
   pim.computeError(x1, x2, bias, aH1, aH2, aH3);
   std::function<Vector9(const NavState&, const NavState&,
                         const imuBias::ConstantBias&)>
-      f = std::bind(&ManifoldPreintegration::computeError, pim,
+      f = std::bind(&ManifoldPreintegration<>::computeError, pim,
                     std::placeholders::_1, std::placeholders::_2,
                     std::placeholders::_3, nullptr, nullptr,
                     nullptr);
@@ -119,7 +119,7 @@ TEST(ManifoldPreintegration, CompareWithPreintegratedRotation) {
 
   // Now do the same for a ManifoldPreintegration object
   imuBias::ConstantBias biasHat {Z_3x1, biasOmega};
-  ManifoldPreintegration manifoldPim(testing::Params(), biasHat);
+  ManifoldPreintegration<> manifoldPim(testing::Params(), biasHat);
   manifoldPim.integrateMeasurement(Z_3x1, measuredOmega, deltaT);
   EXPECT(assert_equal(expected, manifoldPim.deltaRij(), 1e-9));
 
