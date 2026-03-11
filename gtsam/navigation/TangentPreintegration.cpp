@@ -108,8 +108,14 @@ void TangentPreintegration<Bias>::update(const Vector3& measuredAcc,
                                          const double dt, Matrix9* A,
                                          Matrix93* B, Matrix93* C) {
   // Correct for bias in the sensor frame
-  Vector3 acc = biasHat_.correctAccelerometer(measuredAcc);
-  Vector3 omega = biasHat_.correctGyroscope(measuredOmega);
+  Vector3 acc, omega;
+  if constexpr (std::is_same_v<Bias, imuBias::GaussMarkovBias>) {
+    acc = biasHat_.correctAccelerometer(measuredAcc, dt);
+    omega = biasHat_.correctGyroscope(measuredOmega, dt);
+  } else {
+    acc = biasHat_.correctAccelerometer(measuredAcc);
+    omega = biasHat_.correctGyroscope(measuredOmega);
+  }
 
   // Possibly correct for sensor pose by converting to body frame
   Matrix3 D_correctedAcc_acc, D_correctedAcc_omega, D_correctedOmega_omega;

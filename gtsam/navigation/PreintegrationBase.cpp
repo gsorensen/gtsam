@@ -213,5 +213,10 @@ Vector9 PreintegrationBase<Bias>::computeErrorAndJacobians(
 
 // Explicit instantiation
 template class gtsam::PreintegrationBase<gtsam::imuBias::ConstantBias>;
-template std::ostream& gtsam::operator<<<gtsam::imuBias::ConstantBias>(
-    std::ostream& os, const gtsam::PreintegrationBase<gtsam::imuBias::ConstantBias>& pim);
+template class gtsam::PreintegrationBase<gtsam::imuBias::GaussMarkovBias>;
+template std::ostream& gtsam::operator<< <gtsam::imuBias::ConstantBias>(
+    std::ostream& os,
+    const gtsam::PreintegrationBase<gtsam::imuBias::ConstantBias>& pim);
+template std::ostream& gtsam::operator<< <gtsam::imuBias::GaussMarkovBias>(
+    std::ostream& os,
+    const gtsam::PreintegrationBase<gtsam::imuBias::GaussMarkovBias>& pim);
