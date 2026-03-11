@@ -65,7 +65,8 @@ void PreintegratedCombinedMeasurementsT<PreintegrationType, BiasType>::print(
 //------------------------------------------------------------------------------
 template <class PreintegrationType, class BiasType>
 bool PreintegratedCombinedMeasurementsT<PreintegrationType, BiasType>::equals(
-    const PreintegratedCombinedMeasurementsT<PreintegrationType>& other,
+    const PreintegratedCombinedMeasurementsT<PreintegrationType, BiasType>&
+        other,
     double tol) const {
   return PreintegrationType::equals(other, tol) &&
          equal_with_abs_tol(preintMeasCov_, other.preintMeasCov_, tol);
@@ -348,43 +349,53 @@ std::ostream& operator<<(std::ostream& os, const CombinedImuFactor2T<PIM>& f) {
 //------------------------------------------------------------------------------
 // Explicit instantiations
 //------------------------------------------------------------------------------
+// PreintegratedCombinedMeasurementsT
+template class GTSAM_EXPORT PreintegratedCombinedMeasurementsT<
+    ManifoldPreintegration<imuBias::ConstantBias>, imuBias::ConstantBias>;
+template class GTSAM_EXPORT PreintegratedCombinedMeasurementsT<
+    TangentPreintegration<imuBias::ConstantBias>>;
 
+// CombinedImuFactorT
 template class GTSAM_EXPORT
-    PreintegratedCombinedMeasurementsT<ManifoldPreintegration>;
+    CombinedImuFactorT<PreintegratedCombinedMeasurementsT<
+        ManifoldPreintegration<imuBias::ConstantBias>>>;
 template class GTSAM_EXPORT
-    PreintegratedCombinedMeasurementsT<TangentPreintegration>;
+    CombinedImuFactorT<PreintegratedCombinedMeasurementsT<
+        TangentPreintegration<imuBias::ConstantBias>>>;
 
-template class GTSAM_EXPORT CombinedImuFactorT<
-    PreintegratedCombinedMeasurementsT<ManifoldPreintegration>>;
-template class GTSAM_EXPORT CombinedImuFactorT<
-    PreintegratedCombinedMeasurementsT<TangentPreintegration>>;
+// CombinedImuFactor2T
+template class GTSAM_EXPORT
+    CombinedImuFactor2T<PreintegratedCombinedMeasurementsT<
+        ManifoldPreintegration<imuBias::ConstantBias>>>;
+template class GTSAM_EXPORT
+    CombinedImuFactor2T<PreintegratedCombinedMeasurementsT<
+        TangentPreintegration<imuBias::ConstantBias>>>;
 
-template class GTSAM_EXPORT CombinedImuFactor2T<
-    PreintegratedCombinedMeasurementsT<ManifoldPreintegration>>;
-template class GTSAM_EXPORT CombinedImuFactor2T<
-    PreintegratedCombinedMeasurementsT<TangentPreintegration>>;
-
-// Instantiate operator<<
+// operator<< for CombinedImuFactorT
 template GTSAM_EXPORT std::ostream&
-operator<< <PreintegratedCombinedMeasurementsT<ManifoldPreintegration>>(
+operator<< <PreintegratedCombinedMeasurementsT<
+    ManifoldPreintegration<imuBias::ConstantBias>>>(
     std::ostream& os,
-    const CombinedImuFactorT<
-        PreintegratedCombinedMeasurementsT<ManifoldPreintegration>>& f);
+    const CombinedImuFactorT<PreintegratedCombinedMeasurementsT<
+        ManifoldPreintegration<imuBias::ConstantBias>>>& f);
 template GTSAM_EXPORT std::ostream&
-operator<< <PreintegratedCombinedMeasurementsT<TangentPreintegration>>(
+operator<< <PreintegratedCombinedMeasurementsT<
+    TangentPreintegration<imuBias::ConstantBias>>>(
     std::ostream& os,
-    const CombinedImuFactorT<
-        PreintegratedCombinedMeasurementsT<TangentPreintegration>>& f);
+    const CombinedImuFactorT<PreintegratedCombinedMeasurementsT<
+        TangentPreintegration<imuBias::ConstantBias>>>& f);
 
+// operator<< for CombinedImuFactor2T
 template GTSAM_EXPORT std::ostream&
-operator<< <PreintegratedCombinedMeasurementsT<ManifoldPreintegration>>(
+operator<< <PreintegratedCombinedMeasurementsT<
+    ManifoldPreintegration<imuBias::ConstantBias>>>(
     std::ostream& os,
-    const CombinedImuFactor2T<
-        PreintegratedCombinedMeasurementsT<ManifoldPreintegration>>& f);
+    const CombinedImuFactor2T<PreintegratedCombinedMeasurementsT<
+        ManifoldPreintegration<imuBias::ConstantBias>>>& f);
 template GTSAM_EXPORT std::ostream&
-operator<< <PreintegratedCombinedMeasurementsT<TangentPreintegration>>(
+operator<< <PreintegratedCombinedMeasurementsT<
+    TangentPreintegration<imuBias::ConstantBias>>>(
     std::ostream& os,
-    const CombinedImuFactor2T<
-        PreintegratedCombinedMeasurementsT<TangentPreintegration>>& f);
-
+    const CombinedImuFactor2T<PreintegratedCombinedMeasurementsT<
+        TangentPreintegration<imuBias::ConstantBias>>>& f);
 }  // namespace gtsam

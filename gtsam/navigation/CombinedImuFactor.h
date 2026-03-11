@@ -73,7 +73,7 @@ typedef imuBias::ConstantBias DefaultBiasType;
  *
  * @ingroup navigation
  */
-template <class PreintegrationType, class BiasType = imuBias::ConstantBias>
+template <class PreintegrationType, class BiasType>
 class GTSAM_EXPORT PreintegratedCombinedMeasurementsT
     : public PreintegrationType {
  public:
@@ -155,9 +155,9 @@ class GTSAM_EXPORT PreintegratedCombinedMeasurementsT
   void print(
       const std::string& s = "Preintegrated Measurements:") const override;
   /// equals
-  bool equals(
-      const PreintegratedCombinedMeasurementsT<PreintegrationType>& expected,
-      double tol = 1e-9) const;
+  bool equals(const PreintegratedCombinedMeasurementsT<PreintegrationType,
+                                                       BiasType>& expected,
+              double tol = 1e-9) const;
   /// @}
 
   /// @name Main functionality
@@ -209,7 +209,8 @@ class GTSAM_EXPORT PreintegratedCombinedMeasurementsT
 
 // For backward compatibility:
 using PreintegratedCombinedMeasurements =
-    PreintegratedCombinedMeasurementsT<DefaultPreintegrationType>;
+    PreintegratedCombinedMeasurementsT<DefaultPreintegrationType,
+                                       DefaultBiasType>;
 
 /**
  * CombinedImuFactor is a 6-ways factor involving previous state (pose and
@@ -332,10 +333,10 @@ template <>
 struct traits<PreintegrationCombinedParams>
     : public Testable<PreintegrationCombinedParams> {};
 
-template <class PreintegrationType>
-struct traits<PreintegratedCombinedMeasurementsT<PreintegrationType>>
-    : public Testable<PreintegratedCombinedMeasurementsT<PreintegrationType>> {
-};
+template <class PreintegrationType, class BiasType>
+struct traits<PreintegratedCombinedMeasurementsT<PreintegrationType, BiasType>>
+    : public Testable<
+          PreintegratedCombinedMeasurementsT<PreintegrationType, BiasType>> {};
 
 template <class PIM>
 struct traits<CombinedImuFactorT<PIM>>
