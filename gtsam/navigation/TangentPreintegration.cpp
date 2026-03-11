@@ -114,7 +114,7 @@ void TangentPreintegration<Bias>::update(const Vector3& measuredAcc,
   // Possibly correct for sensor pose by converting to body frame
   Matrix3 D_correctedAcc_acc, D_correctedAcc_omega, D_correctedOmega_omega;
   if (p().body_P_sensor) {
-    std::tie(acc, omega) = correctMeasurementsBySensorPose(
+    std::tie(acc, omega) = this->correctMeasurementsBySensorPose(
         acc, omega, D_correctedAcc_acc, D_correctedAcc_omega,
         D_correctedOmega_omega);
   }
@@ -222,12 +222,12 @@ Vector9 TangentPreintegration<Bias>::Compose(const Vector9& zeta01,
 template <typename Bias>
 void TangentPreintegration<Bias>::mergeWith(const TangentPreintegration& pim12,
                                             Matrix9* H1, Matrix9* H2) {
-  if (!matchesParamsWith(pim12)) {
+  if (!this->matchesParamsWith(pim12)) {
     throw std::domain_error(
         "Cannot merge pre-integrated measurements with different params");
   }
 
-  if (params()->body_P_sensor) {
+  if (this->params()->body_P_sensor) {
     throw std::domain_error(
         "Cannot merge pre-integrated measurements with sensor pose yet");
   }
@@ -255,3 +255,6 @@ void TangentPreintegration<Bias>::mergeWith(const TangentPreintegration& pim12,
 //------------------------------------------------------------------------------
 
 }  // namespace gtsam
+
+// Explicit instantiation
+template class gtsam::TangentPreintegration<gtsam::imuBias::ConstantBias>;

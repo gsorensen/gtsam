@@ -39,10 +39,12 @@ class GTSAM_EXPORT ManifoldPreintegration : public PreintegrationBase<Bias> {
   using PreintegrationBase<Bias>::deltaTij_;
   using PreintegrationBase<Bias>::p_;
   using PreintegrationBase<Bias>::p;
-  using PreintegrationBase<Bias>::correctMeasurementsBySensorPose;
+
+ public:
   using PreintegrationBase<Bias>::deltaTij;
   using PreintegrationBase<Bias>::params;
   using PreintegrationBase<Bias>::biasHat;
+  using PreintegrationBase<Bias>::correctMeasurementsBySensorPose;
   /**
    * Pre-integrated navigation state, from frame i to frame
    * j Note: relative position does not take into account

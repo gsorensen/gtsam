@@ -210,3 +210,8 @@ Vector9 PreintegrationBase<Bias>::computeErrorAndJacobians(
 //------------------------------------------------------------------------------
 
 }  // namespace gtsam
+
+// Explicit instantiation
+template class gtsam::PreintegrationBase<gtsam::imuBias::ConstantBias>;
+template std::ostream& gtsam::operator<<<gtsam::imuBias::ConstantBias>(
+    std::ostream& os, const gtsam::PreintegrationBase<gtsam::imuBias::ConstantBias>& pim);

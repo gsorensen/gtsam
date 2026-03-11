@@ -33,10 +33,12 @@ class GTSAM_EXPORT TangentPreintegration : public PreintegrationBase<Bias> {
   using PreintegrationBase<Bias>::deltaTij_;
   using PreintegrationBase<Bias>::p_;
   using PreintegrationBase<Bias>::p;
-  using PreintegrationBase<Bias>::correctMeasurementsBySensorPose;
+
+ public:
   using PreintegrationBase<Bias>::deltaTij;
   using PreintegrationBase<Bias>::params;
   using PreintegrationBase<Bias>::biasHat;
+  using PreintegrationBase<Bias>::correctMeasurementsBySensorPose;
   /**
    * Preintegrated navigation state, as a 9D vector on tangent space at frame i
    * Order is: theta, position, velocity

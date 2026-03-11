@@ -67,7 +67,7 @@ void ManifoldPreintegration<Bias>::update(const Vector3& measuredAcc,
   // Possibly correct for sensor pose
   Matrix3 D_correctedAcc_acc, D_correctedAcc_omega, D_correctedOmega_omega;
   if (p().body_P_sensor) {
-    std::tie(acc, omega) = correctMeasurementsBySensorPose(
+    std::tie(acc, omega) = this->correctMeasurementsBySensorPose(
         acc, omega, D_correctedAcc_acc, D_correctedAcc_omega,
         D_correctedOmega_omega);
   }
@@ -143,3 +143,6 @@ Vector9 ManifoldPreintegration<Bias>::biasCorrectedDelta(
 //------------------------------------------------------------------------------
 
 }  // namespace gtsam
+
+// Explicit instantiation
+template class gtsam::ManifoldPreintegration<gtsam::imuBias::ConstantBias>;
