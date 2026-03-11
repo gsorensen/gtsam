@@ -73,6 +73,11 @@ class GTSAM_EXPORT GaussMarkovBias {
   const Vector3& accelerometer() const { return biasAcc_; }
   const Vector3& gyroscope() const { return biasGyro_; }
 
+  /// Return accelerometer correlation time
+  double tauAcc() const { return tauAcc_; }
+  /// Return gyroscope correlation time
+  double tauGyro() const { return tauGyro_; }
+
   Vector3 correctAccelerometer(const Vector3& measurement, double dt,
                                OptionalJacobian<3, 6> H1 = {},
                                OptionalJacobian<3, 3> H2 = {}) const {

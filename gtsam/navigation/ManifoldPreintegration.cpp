@@ -107,14 +107,27 @@ void ManifoldPreintegration<Bias>::update(const Vector3& measuredAcc,
   const Rot3 incrR =
       Rot3::Expmap(integratedOmega, D_incrR_integratedOmega);  // expensive !!
   const Matrix3 incrRt = incrR.transpose();
-  delRdelBiasOmega_ = incrRt * delRdelBiasOmega_ - D_incrR_integratedOmega * dt;
 
   double dt22 = 0.5 * dt * dt;
   const Matrix3 dRij = oldRij.matrix();  // expensive
-  delPdelBiasAcc_ += delVdelBiasAcc_ * dt - dt22 * dRij;
-  delPdelBiasOmega_ += dt * delVdelBiasOmega_ + dt22 * D_acc_biasOmega;
-  delVdelBiasAcc_ += -dRij * dt;
-  delVdelBiasOmega_ += D_acc_biasOmega * dt;
+
+  // For ConstantBias: acc_H_biasAcc = -I, omega_H_biasOmega = -I (beta = 1)
+  // For GaussMarkovBias: acc_H_biasAcc = -beta_acc * I, omega_H_biasOmega = -beta_omega * I
+  if constexpr (std::is_same_v<Bias, imuBias::GaussMarkovBias>) {
+    const double beta_acc = std::exp(-dt / biasHat_.tauAcc());
+    const double beta_omega = std::exp(-dt / biasHat_.tauGyro());
+    delRdelBiasOmega_ = incrRt * delRdelBiasOmega_ - beta_omega * D_incrR_integratedOmega * dt;
+    delPdelBiasAcc_ += delVdelBiasAcc_ * dt - beta_acc * dt22 * dRij;
+    delPdelBiasOmega_ += dt * delVdelBiasOmega_ + dt22 * D_acc_biasOmega;
+    delVdelBiasAcc_ += -beta_acc * dRij * dt;
+    delVdelBiasOmega_ += D_acc_biasOmega * dt;
+  } else {
+    delRdelBiasOmega_ = incrRt * delRdelBiasOmega_ - D_incrR_integratedOmega * dt;
+    delPdelBiasAcc_ += delVdelBiasAcc_ * dt - dt22 * dRij;
+    delPdelBiasOmega_ += dt * delVdelBiasOmega_ + dt22 * D_acc_biasOmega;
+    delVdelBiasAcc_ += -dRij * dt;
+    delVdelBiasOmega_ += D_acc_biasOmega * dt;
+  }
 }
 
 //------------------------------------------------------------------------------

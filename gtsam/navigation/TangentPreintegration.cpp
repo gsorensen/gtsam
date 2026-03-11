@@ -17,6 +17,7 @@
 
 #include "TangentPreintegration.h"
 
+#include <cmath>
 #include <gtsam/base/numericalDerivative.h>
 
 using namespace std;
@@ -138,14 +139,18 @@ void TangentPreintegration<Bias>::update(const Vector3& measuredAcc,
   }
 
   // new_H_biasAcc = new_H_old * old_H_biasAcc + new_H_acc * acc_H_biasAcc
-  // where acc_H_biasAcc = -I_3x3, hence
-  // new_H_biasAcc = new_H_old * old_H_biasAcc - new_H_acc
-  preintegrated_H_biasAcc_ = (*A) * preintegrated_H_biasAcc_ - (*B);
-
-  // new_H_biasOmega = new_H_old * old_H_biasOmega + new_H_omega *
-  // omega_H_biasOmega where omega_H_biasOmega = -I_3x3, hence new_H_biasOmega =
-  // new_H_old * old_H_biasOmega - new_H_omega
-  preintegrated_H_biasOmega_ = (*A) * preintegrated_H_biasOmega_ - (*C);
+  // new_H_biasOmega = new_H_old * old_H_biasOmega + new_H_omega * omega_H_biasOmega
+  // For ConstantBias: acc_H_biasAcc = omega_H_biasOmega = -I_3x3
+  // For GaussMarkovBias: acc_H_biasAcc = -beta_acc * I_3x3, omega_H_biasOmega = -beta_omega * I_3x3
+  if constexpr (std::is_same_v<Bias, imuBias::GaussMarkovBias>) {
+    const double beta_acc = std::exp(-dt / biasHat_.tauAcc());
+    const double beta_omega = std::exp(-dt / biasHat_.tauGyro());
+    preintegrated_H_biasAcc_ = (*A) * preintegrated_H_biasAcc_ - beta_acc * (*B);
+    preintegrated_H_biasOmega_ = (*A) * preintegrated_H_biasOmega_ - beta_omega * (*C);
+  } else {
+    preintegrated_H_biasAcc_ = (*A) * preintegrated_H_biasAcc_ - (*B);
+    preintegrated_H_biasOmega_ = (*A) * preintegrated_H_biasOmega_ - (*C);
+  }
 }
 
 //------------------------------------------------------------------------------
