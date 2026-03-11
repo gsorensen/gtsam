@@ -122,7 +122,7 @@ TEST_PIM(ImuFactor, PreintegratedMeasurements) {
   Matrix96 aH3;
   actual.computeError(x1, x2, bias, aH1, aH2, aH3);
   std::function<Vector9(const NavState&, const NavState&, const Bias&)> f =
-      std::bind(&PreintegrationBase::computeError, actual,
+      std::bind(&PreintegrationBase<imuBias::ConstantBias>::computeError, actual,
                   std::placeholders::_1, std::placeholders::_2, std::placeholders::_3,
                   nullptr, nullptr, nullptr);
   EXPECT(assert_equal(numericalDerivative31(f, x1, x2, bias), aH1, 1e-9));
@@ -179,7 +179,7 @@ TEST_PIM(ImuFactor, PreintegrationBaseMethods) {
   Matrix96 actualH;
   pim.biasCorrectedDelta(kZeroBias, actualH);
   Matrix expectedH = numericalDerivative11<Vector9, Bias>(
-      std::bind(&PreintegrationBase::biasCorrectedDelta, pim,
+      std::bind(&PreintegrationBase<imuBias::ConstantBias>::biasCorrectedDelta, pim,
           std::placeholders::_1, nullptr), kZeroBias);
   EXPECT(assert_equal(expectedH, actualH));
 
@@ -187,11 +187,11 @@ TEST_PIM(ImuFactor, PreintegrationBaseMethods) {
   Matrix96 aH2;
   NavState predictedState = pim.predict(state1, kZeroBias, aH1, aH2);
   Matrix eH1 = numericalDerivative11<NavState, NavState>(
-      std::bind(&PreintegrationBase::predict, pim, std::placeholders::_1,
+      std::bind(&PreintegrationBase<imuBias::ConstantBias>::predict, pim, std::placeholders::_1,
           kZeroBias, nullptr, nullptr), state1);
   EXPECT(assert_equal(eH1, aH1));
   Matrix eH2 = numericalDerivative11<NavState, Bias>(
-      std::bind(&PreintegrationBase::predict, pim, state1,
+      std::bind(&PreintegrationBase<imuBias::ConstantBias>::predict, pim, state1,
           std::placeholders::_1, nullptr, nullptr), kZeroBias);
   EXPECT(assert_equal(eH2, aH2));
 }
@@ -312,7 +312,7 @@ TEST_PIM(ImuFactor, ErrorAndJacobianWithBiases) {
   Matrix96 actualH;
   pim.biasCorrectedDelta(bias, actualH);
   Matrix expectedH = numericalDerivative11<Vector9, Bias>(
-      std::bind(&PreintegrationBase::biasCorrectedDelta, pim,
+      std::bind(&PreintegrationBase<imuBias::ConstantBias>::biasCorrectedDelta, pim,
           std::placeholders::_1, nullptr), bias);
   EXPECT(assert_equal(expectedH, actualH));
 

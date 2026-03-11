@@ -188,27 +188,27 @@ Vector ImuFactor2T<PIM>::evaluateError(const NavState& state_i,
 //------------------------------------------------------------------------------
 // Explicit instantiations
 //------------------------------------------------------------------------------
-template class GTSAM_EXPORT PreintegratedImuMeasurementsT<ManifoldPreintegration>;
-template class GTSAM_EXPORT PreintegratedImuMeasurementsT<TangentPreintegration>;
+template class GTSAM_EXPORT PreintegratedImuMeasurementsT<ManifoldPreintegration<imuBias::ConstantBias>>;
+template class GTSAM_EXPORT PreintegratedImuMeasurementsT<TangentPreintegration<imuBias::ConstantBias>>;
 
 // ImuFactorT instantiations
-template class GTSAM_EXPORT ImuFactorT<PreintegratedImuMeasurementsT<ManifoldPreintegration>>;
-template class GTSAM_EXPORT ImuFactorT<PreintegratedImuMeasurementsT<TangentPreintegration>>;
+template class GTSAM_EXPORT ImuFactorT<PreintegratedImuMeasurementsT<ManifoldPreintegration<imuBias::ConstantBias>>>;
+template class GTSAM_EXPORT ImuFactorT<PreintegratedImuMeasurementsT<TangentPreintegration<imuBias::ConstantBias>>>;
 
 // ImuFactor2T instantiations
-template class GTSAM_EXPORT ImuFactor2T<PreintegratedImuMeasurementsT<ManifoldPreintegration>>;
-template class GTSAM_EXPORT ImuFactor2T<PreintegratedImuMeasurementsT<TangentPreintegration>>;
+template class GTSAM_EXPORT ImuFactor2T<PreintegratedImuMeasurementsT<ManifoldPreintegration<imuBias::ConstantBias>>>;
+template class GTSAM_EXPORT ImuFactor2T<PreintegratedImuMeasurementsT<TangentPreintegration<imuBias::ConstantBias>>>;
 
 // operator<< instantiations
-template GTSAM_EXPORT std::ostream& operator<<<PreintegratedImuMeasurementsT<ManifoldPreintegration>>(
-    std::ostream& os, const ImuFactorT<PreintegratedImuMeasurementsT<ManifoldPreintegration>>& f);
-template GTSAM_EXPORT std::ostream& operator<<<PreintegratedImuMeasurementsT<TangentPreintegration>>(
-    std::ostream& os, const ImuFactorT<PreintegratedImuMeasurementsT<TangentPreintegration>>& f);
+template GTSAM_EXPORT std::ostream& operator<<<PreintegratedImuMeasurementsT<ManifoldPreintegration<imuBias::ConstantBias>>>(
+    std::ostream& os, const ImuFactorT<PreintegratedImuMeasurementsT<ManifoldPreintegration<imuBias::ConstantBias>>>& f);
+template GTSAM_EXPORT std::ostream& operator<<<PreintegratedImuMeasurementsT<TangentPreintegration<imuBias::ConstantBias>>>(
+    std::ostream& os, const ImuFactorT<PreintegratedImuMeasurementsT<TangentPreintegration<imuBias::ConstantBias>>>& f);
 
-template GTSAM_EXPORT std::ostream& operator<<<PreintegratedImuMeasurementsT<ManifoldPreintegration>>(
-    std::ostream& os, const ImuFactor2T<PreintegratedImuMeasurementsT<ManifoldPreintegration>>& f);
-template GTSAM_EXPORT std::ostream& operator<<<PreintegratedImuMeasurementsT<TangentPreintegration>>(
-    std::ostream& os, const ImuFactor2T<PreintegratedImuMeasurementsT<TangentPreintegration>>& f);
+template GTSAM_EXPORT std::ostream& operator<<<PreintegratedImuMeasurementsT<ManifoldPreintegration<imuBias::ConstantBias>>>(
+    std::ostream& os, const ImuFactor2T<PreintegratedImuMeasurementsT<ManifoldPreintegration<imuBias::ConstantBias>>>& f);
+template GTSAM_EXPORT std::ostream& operator<<<PreintegratedImuMeasurementsT<TangentPreintegration<imuBias::ConstantBias>>>(
+    std::ostream& os, const ImuFactor2T<PreintegratedImuMeasurementsT<TangentPreintegration<imuBias::ConstantBias>>>& f);
 
 }
 // namespace gtsam

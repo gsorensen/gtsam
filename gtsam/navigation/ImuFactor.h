@@ -23,7 +23,6 @@
 
 /* GTSAM includes */
 #include <gtsam/nonlinear/NonlinearFactor.h>
-#include <gtsam/nonlinear/NoiseModelFactorN.h>
 #include <gtsam/navigation/ManifoldPreintegration.h>
 #include <gtsam/navigation/TangentPreintegration.h>
 #include <gtsam/base/debug.h>
@@ -34,9 +33,9 @@ namespace gtsam {
 
 // Determine default preintegration backend
 #ifdef GTSAM_TANGENT_PREINTEGRATION
-typedef TangentPreintegration DefaultPreintegrationType;
+typedef TangentPreintegration<imuBias::ConstantBias> DefaultPreintegrationType;
 #else
-typedef ManifoldPreintegration DefaultPreintegrationType;
+typedef ManifoldPreintegration<imuBias::ConstantBias> DefaultPreintegrationType;
 #endif
 
 /*
@@ -146,8 +145,8 @@ public:
   /// This method is specific to TangentPreintegration backend.
   template <typename PB = PreintegrationType,
              // This method is only callable when PreintegrationType is TangentPreintegration.
-             typename = typename std::enable_if<std::is_same<PB, TangentPreintegration>::value>::type>
-  void mergeWith(const PreintegratedImuMeasurementsT<TangentPreintegration>& pim12, Matrix9* H1, Matrix9* H2) {
+             typename = typename std::enable_if<std::is_same<PB, TangentPreintegration<imuBias::ConstantBias>>::value>::type>
+  void mergeWith(const PreintegratedImuMeasurementsT<TangentPreintegration<imuBias::ConstantBias>>& pim12, Matrix9* H1, Matrix9* H2) {
     // The `this->PreintegrationType::mergeWith` implies calling TangentPreintegration's mergeWith.
     // Since pim12 is PreintegratedImuMeasurementsT<TangentPreintegration>, it is a TangentPreintegration.
     this->PreintegrationType::mergeWith(pim12, H1, H2);
@@ -257,7 +256,7 @@ public:
   template <typename MethodPIMArg = PIM,
     // This method is only callable when PIM is PreintegratedImuMeasurementsT<TangentPreintegration>.
     typename = typename std::enable_if<
-        std::is_same<MethodPIMArg, PreintegratedImuMeasurementsT<TangentPreintegration>>::value
+        std::is_same<MethodPIMArg, PreintegratedImuMeasurementsT<TangentPreintegration<imuBias::ConstantBias>>>::value
     >::type
   >
   static MethodPIMArg Merge(
@@ -292,7 +291,7 @@ public:
     typename MethodPIMArg = PIM,
     // This method is only callable when PIM is PreintegratedImuMeasurementsT<TangentPreintegration>.
     typename = typename std::enable_if<
-        std::is_same<MethodPIMArg, PreintegratedImuMeasurementsT<TangentPreintegration>>::value
+        std::is_same<MethodPIMArg, PreintegratedImuMeasurementsT<TangentPreintegration<imuBias::ConstantBias>>>::value
     >::type
   >
   static typename ImuFactorT<MethodPIMArg>::shared_ptr Merge(
