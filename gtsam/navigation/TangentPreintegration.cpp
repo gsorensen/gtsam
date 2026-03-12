@@ -112,8 +112,11 @@ void TangentPreintegration<Bias>::update(const Vector3& measuredAcc,
   // Correct for bias in the sensor frame
   Vector3 acc, omega;
   if constexpr (std::is_same_v<Bias, imuBias::GaussMarkovBias>) {
-    acc = biasHat_.correctAccelerometer(measuredAcc, dt);
-    omega = biasHat_.correctGyroscope(measuredOmega, dt);
+    // Use accumulated time (not step dt) for the Gauss-Markov decay.
+    // deltaTij_ has not been incremented yet, so it is the elapsed time
+    // at the start of this measurement step.
+    acc = biasHat_.correctAccelerometer(measuredAcc, deltaTij_);
+    omega = biasHat_.correctGyroscope(measuredOmega, deltaTij_);
   } else {
     acc = biasHat_.correctAccelerometer(measuredAcc);
     omega = biasHat_.correctGyroscope(measuredOmega);
@@ -145,8 +148,11 @@ void TangentPreintegration<Bias>::update(const Vector3& measuredAcc,
   // -I_3x3 For GaussMarkovBias: acc_H_biasAcc = -beta_acc * I_3x3,
   // omega_H_biasOmega = -beta_omega * I_3x3
   if constexpr (std::is_same_v<Bias, imuBias::GaussMarkovBias>) {
-    const double beta_acc = std::exp(-dt / biasHat_.tauAcc());
-    const double beta_omega = std::exp(-dt / biasHat_.tauGyro());
+    // deltaTij_ was already incremented by dt above, so subtract dt
+    // to get the elapsed time at the start of this measurement step.
+    const double t_k = deltaTij_ - dt;
+    const double beta_acc = std::exp(-t_k / biasHat_.tauAcc());
+    const double beta_omega = std::exp(-t_k / biasHat_.tauGyro());
     preintegrated_H_biasAcc_ =
         (*A) * preintegrated_H_biasAcc_ - beta_acc * (*B);
     preintegrated_H_biasOmega_ =

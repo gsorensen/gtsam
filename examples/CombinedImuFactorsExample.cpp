@@ -238,6 +238,11 @@ int runEstimation(const string& data_filename, const string& output_filename) {
 
       LevenbergMarquardtParams params;
       params.setVerbosityLM("SUMMARY");
+      // GaussMarkov bias model creates a harder optimization landscape;
+      // increase the lambda upper bound to allow more damping.
+      if constexpr (std::is_same_v<BIAS, imuBias::GaussMarkovBias>) {
+        params.setlambdaUpperBound(1e10);
+      }
       LevenbergMarquardtOptimizer optimizer(graph, initial_values, params);
       Values result = optimizer.optimize();
 

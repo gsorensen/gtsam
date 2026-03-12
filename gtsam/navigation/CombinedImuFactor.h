@@ -483,9 +483,26 @@ void PreintegratedCombinedMeasurementsT<PreintegrationType, BiasType>::
   Eigen::Matrix<double, 15, 15> F;
   F.setZero();
   F.block<9, 9>(0, 0) = A;
-  F.block<3, 3>(0, 12) = theta_H_omega;
-  F.block<3, 3>(3, 9) = pos_H_acc;
-  F.block<3, 3>(6, 9) = vel_H_acc;
+
+  // Off-diagonal blocks: NavState dependence on bias.
+  // B and C are Jacobians w.r.t. corrected measurements; to get Jacobians
+  // w.r.t. bias we chain through the bias correction:
+  //   ConstantBias:    d(corrected)/d(bias) = -I  (sign cancels in F*P*F^T)
+  //   GaussMarkovBias: d(corrected)/d(bias) = -beta*I  (beta matters!)
+  if constexpr (std::is_same_v<BiasType, imuBias::GaussMarkovBias>) {
+    // deltaTij_ was already incremented by dt in update(), so subtract dt
+    // to get the elapsed time at the start of this measurement step.
+    const double t_k = this->deltaTij_ - dt;
+    const double beta_acc = std::exp(-t_k / this->biasHat_.tauAcc());
+    const double beta_omega = std::exp(-t_k / this->biasHat_.tauGyro());
+    F.block<3, 3>(0, 12) = beta_omega * theta_H_omega;
+    F.block<3, 3>(3, 9) = beta_acc * pos_H_acc;
+    F.block<3, 3>(6, 9) = beta_acc * vel_H_acc;
+  } else {
+    F.block<3, 3>(0, 12) = theta_H_omega;
+    F.block<3, 3>(3, 9) = pos_H_acc;
+    F.block<3, 3>(6, 9) = vel_H_acc;
+  }
 
   // Bias state transition:
   //   ConstantBias  (random walk):   I_6x6
@@ -564,10 +581,17 @@ Vector CombinedImuFactorT<PIM, BIAS>::evaluateError(
     const Vector3& vel_j, const BIAS& bias_i, const BIAS& bias_j,
     OptionalMatrixType H1, OptionalMatrixType H2, OptionalMatrixType H3,
     OptionalMatrixType H4, OptionalMatrixType H5, OptionalMatrixType H6) const {
-  Matrix6 Hbias_i, Hbias_j;
-  Vector6 fbias = traits<BIAS>::Between(bias_j, bias_i, H6 ? &Hbias_j : 0,
-                                        H5 ? &Hbias_i : 0)
-                      .vector();
+  // Compute the bias state transition over the full preintegration interval.
+  // For ConstantBias: F_total = I_6x6
+  // For GaussMarkovBias: F_total = diag(exp(-T/tauAcc)*I3, exp(-T/tauGyro)*I3)
+  const Matrix6 F_total =
+      pim_.p().biasFTransition(pim_.deltaTij(), pim_.biasHat());
+
+  // Bias error: predicted bias_j minus actual bias_j
+  //   predicted bias_j = F_total * bias_i (+ noise)
+  //   error = F_total * bias_i - bias_j
+  // For ConstantBias (F_total=I) this reduces to bias_i - bias_j.
+  const Vector6 fbias = F_total * bias_i.vector() - bias_j.vector();
 
   Matrix96 D_r_pose_i, D_r_pose_j, D_r_bias_i;
   Matrix93 D_r_vel_i, D_r_vel_j;
@@ -600,12 +624,14 @@ Vector CombinedImuFactorT<PIM, BIAS>::evaluateError(
   if (H5) {
     H5->resize(15, 6);
     H5->block<9, 6>(0, 0) = D_r_bias_i;
-    H5->block<6, 6>(9, 0) = Hbias_i;
+    // d(fbias)/d(bias_i) = F_total
+    H5->block<6, 6>(9, 0) = F_total;
   }
   if (H6) {
     H6->resize(15, 6);
     H6->block<9, 6>(0, 0).setZero();
-    H6->block<6, 6>(9, 0) = Hbias_j;
+    // d(fbias)/d(bias_j) = -I
+    H6->block<6, 6>(9, 0) = -I_6x6;
   }
 
   Vector r(15);
