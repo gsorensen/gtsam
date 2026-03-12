@@ -294,7 +294,7 @@ struct traits<imuBias::ConstantBias>
     : public internal::VectorSpace<imuBias::ConstantBias> {};
 
 template <>
-struct traits<const imuBias::GaussMarkovBias>
+struct traits<imuBias::GaussMarkovBias>
     : public internal::VectorSpace<imuBias::GaussMarkovBias> {};
 
 }  // namespace gtsam

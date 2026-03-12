@@ -24,26 +24,38 @@
 
 /* GTSAM includes */
 #include <gtsam/base/Matrix.h>
+#include <gtsam/navigation/ImuBias.h>
 #include <gtsam/navigation/ManifoldPreintegration.h>
 #include <gtsam/navigation/TangentPreintegration.h>
 #include <gtsam/nonlinear/NonlinearFactor.h>
 
+#include <cmath>
+#include <type_traits>
+
 namespace gtsam {
 
-/// Parameters for pre-integration using PreintegratedCombinedMeasurements:
-/// Usage: Create just a single Params and pass a shared pointer to the
-/// constructor
-struct GTSAM_EXPORT PreintegrationCombinedParams : PreintegrationParams {
+/// Parameters for pre-integration using PreintegratedCombinedMeasurements,
+/// templated on the bias type so that Gauss-Markov dynamics can be
+/// handled correctly during covariance propagation.
+///
+/// For ConstantBias (random walk):
+///   F_bias = I_6x6,  Q_d = Q_c * dt
+///
+/// For GaussMarkovBias (1st-order Gauss-Markov):
+///   F_bias = diag(exp(-dt/tauAcc)*I3, exp(-dt/tauGyro)*I3)
+///   Q_d    = Q_c * (1 - exp(-2*dt/tau)) / 2
+///
+template <class BIAS = imuBias::ConstantBias>
+struct GTSAM_EXPORT PreintegrationCombinedParamsT : PreintegrationParams {
   Matrix3 biasAccCovariance;    ///< continuous-time "Covariance" describing
-                                ///< accelerometer bias random walk
+                                ///< accelerometer bias evolution
   Matrix3 biasOmegaCovariance;  ///< continuous-time "Covariance" describing
-                                ///< gyroscope bias random walk
+                                ///< gyroscope bias evolution
 
   /// Default constructor makes uninitialized params struct.
   /// Used for serialization.
-  PreintegrationCombinedParams()
-    : biasAccCovariance(I_3x3),
-    biasOmegaCovariance(I_3x3) {
+  PreintegrationCombinedParamsT()
+      : biasAccCovariance(I_3x3), biasOmegaCovariance(I_3x3) {
 #ifdef GTSAM_ALLOW_DEPRECATED_SINCE_V43
     biasAccOmegaInt.setZero();
 #endif
@@ -51,10 +63,10 @@ struct GTSAM_EXPORT PreintegrationCombinedParams : PreintegrationParams {
 
   /// See two named constructors below for good values of n_gravity in body
   /// frame
-  PreintegrationCombinedParams(const Vector3& n_gravity_)
-    : PreintegrationParams(n_gravity_),
-    biasAccCovariance(I_3x3),
-    biasOmegaCovariance(I_3x3) {
+  PreintegrationCombinedParamsT(const Vector3& n_gravity)
+      : PreintegrationParams(n_gravity),
+        biasAccCovariance(I_3x3),
+        biasOmegaCovariance(I_3x3) {
 #ifdef GTSAM_ALLOW_DEPRECATED_SINCE_V43
     biasAccOmegaInt.setZero();
 #endif
@@ -62,40 +74,120 @@ struct GTSAM_EXPORT PreintegrationCombinedParams : PreintegrationParams {
 
   // Default Params for a Z-down navigation frame, such as NED: gravity points
   // along positive Z-axis
-  static std::shared_ptr<PreintegrationCombinedParams> MakeSharedD(
+  static std::shared_ptr<PreintegrationCombinedParamsT> MakeSharedD(
       double g = 9.81) {
-    return std::shared_ptr<PreintegrationCombinedParams>(
-        new PreintegrationCombinedParams(Vector3(0, 0, g)));
+    return std::shared_ptr<PreintegrationCombinedParamsT>(
+        new PreintegrationCombinedParamsT(Vector3(0, 0, g)));
   }
 
   // Default Params for a Z-up navigation frame, such as ENU: gravity points
   // along negative Z-axis
-  static std::shared_ptr<PreintegrationCombinedParams> MakeSharedU(
+  static std::shared_ptr<PreintegrationCombinedParamsT> MakeSharedU(
       double g = 9.81) {
-    return std::shared_ptr<PreintegrationCombinedParams>(
-        new PreintegrationCombinedParams(Vector3(0, 0, -g)));
+    return std::shared_ptr<PreintegrationCombinedParamsT>(
+        new PreintegrationCombinedParamsT(Vector3(0, 0, -g)));
   }
 
-  void print(const std::string& s = "") const override;
+  //------------------------------------------------------------------------------
+  // Inner class PreintegrationCombinedParams
+  //------------------------------------------------------------------------------
+  void print(const std::string& s = "") const override {
+    PreintegrationParams::print(s);
+    std::cout << "biasAccCovariance:\n[\n"
+              << biasAccCovariance << "\n]" << std::endl;
+    std::cout << "biasOmegaCovariance:\n[\n"
+              << biasOmegaCovariance << "\n]" << std::endl;
+  }
+
   bool equals(const PreintegratedRotationParams& other,
-              double tol) const override;
+              double tol) const override {
+    auto e = dynamic_cast<const PreintegrationCombinedParamsT*>(&other);
+    return e != nullptr && PreintegrationParams::equals(other, tol) &&
+           equal_with_abs_tol(biasAccCovariance, e->biasAccCovariance, tol) &&
+           equal_with_abs_tol(biasOmegaCovariance, e->biasOmegaCovariance, tol);
+  }
 
   void setBiasAccCovariance(const Matrix3& cov) { biasAccCovariance = cov; }
   void setBiasOmegaCovariance(const Matrix3& cov) { biasOmegaCovariance = cov; }
 
   const Matrix3& getBiasAccCovariance() const { return biasAccCovariance; }
   const Matrix3& getBiasOmegaCovariance() const { return biasOmegaCovariance; }
-  
+
+  // ---- Bias propagation helpers -----------------------------------------
+
+  /**
+   * Compute the discrete state-transition matrix for the bias block (6x6)
+   * over an integration step of size dt.
+   *
+   * Needs access to the biasHat to read tau values for GaussMarkovBias.
+   *
+   * ConstantBias:     F_bias = I_6x6
+   * GaussMarkovBias:  F_bias = diag(exp(-dt/tauAcc)*I3, exp(-dt/tauGyro)*I3)
+   */
+  Matrix6 biasFTransition(double dt, const BIAS& biasHat) const {
+    if constexpr (std::is_same_v<BIAS, imuBias::GaussMarkovBias>) {
+      Matrix6 F_bias;
+      F_bias.setZero();
+      F_bias.template topLeftCorner<3, 3>() =
+          std::exp(-dt / biasHat.tauAcc()) * I_3x3;
+      F_bias.template bottomRightCorner<3, 3>() =
+          std::exp(-dt / biasHat.tauGyro()) * I_3x3;
+      return F_bias;
+    } else {
+      (void)biasHat;  // unused
+      return I_6x6;
+    }
+  }
+
+  /**
+   * Compute the discrete process-noise covariance for the accelerometer bias
+   * block (3x3) over an integration step of size dt.
+   *
+   * ConstantBias:     Q_d = biasAccCovariance * dt
+   * GaussMarkovBias:  Q_d = biasAccCovariance * (1 - exp(-2*dt/tauAcc)) / 2
+   */
+  Matrix3 discreteBiasAccCovariance(double dt, const BIAS& biasHat) const {
+    if constexpr (std::is_same_v<BIAS, imuBias::GaussMarkovBias>) {
+      const double scale = (1.0 - std::exp(-2.0 * dt / biasHat.tauAcc())) / 2.0;
+      return biasAccCovariance * scale;
+    } else {
+      (void)biasHat;
+      return biasAccCovariance * dt;
+    }
+  }
+
+  /**
+   * Compute the discrete process-noise covariance for the gyroscope bias
+   * block (3x3) over an integration step of size dt.
+   *
+   * ConstantBias:     Q_d = biasOmegaCovariance * dt
+   * GaussMarkovBias:  Q_d = biasOmegaCovariance * (1 - exp(-2*dt/tauGyro)) / 2
+   */
+  Matrix3 discreteBiasOmegaCovariance(double dt, const BIAS& biasHat) const {
+    if constexpr (std::is_same_v<BIAS, imuBias::GaussMarkovBias>) {
+      const double scale =
+          (1.0 - std::exp(-2.0 * dt / biasHat.tauGyro())) / 2.0;
+      return biasOmegaCovariance * scale;
+    } else {
+      (void)biasHat;
+      return biasOmegaCovariance * dt;
+    }
+  }
+
 #ifdef GTSAM_ALLOW_DEPRECATED_SINCE_V43
   Matrix6 biasAccOmegaInt;
-  /// @deprecated: biasAccOmegaInt is no longer used. Use a prior on first bias instead.
+  /// @deprecated: biasAccOmegaInt is no longer used.
   void setBiasAccOmegaInit(const Matrix6& cov) {
-    std::cerr << "Warning: setBiasAccOmegaInit() is deprecated and no longer used." << std::endl;
+    std::cerr << "Warning: setBiasAccOmegaInit() is deprecated and no longer "
+                 "used."
+              << std::endl;
     biasAccOmegaInt = cov;
   }
-  /// @deprecated: biasAccOmegaInt is no longer used. Use a prior on first bias instead.
+  /// @deprecated: biasAccOmegaInt is no longer used.
   const Matrix6& getBiasAccOmegaInit() const {
-    std::cerr << "Warning: getBiasAccOmegaInit() is deprecated and no longer used." << std::endl;
+    std::cerr << "Warning: getBiasAccOmegaInit() is deprecated and no longer "
+                 "used."
+              << std::endl;
     return biasAccOmegaInt;
   }
 #endif
@@ -119,5 +211,10 @@ struct GTSAM_EXPORT PreintegrationCombinedParams : PreintegrationParams {
  public:
   GTSAM_MAKE_ALIGNED_OPERATOR_NEW
 };
+
+// Backward-compatible alias: existing code that spells
+// PreintegrationCombinedParams gets the ConstantBias version.
+using PreintegrationCombinedParams =
+    PreintegrationCombinedParamsT<imuBias::ConstantBias>;
 
 }  // namespace gtsam

@@ -29,22 +29,10 @@ namespace gtsam {
 
 using namespace std;
 
-//------------------------------------------------------------------------------
-// Inner class PreintegrationCombinedParams
-//------------------------------------------------------------------------------
-void PreintegrationCombinedParams::print(const string& s) const {
-  PreintegrationParams::print(s);
-  cout << "biasAccCovariance:\n[\n" << biasAccCovariance << "\n]" << endl;
-  cout << "biasOmegaCovariance:\n[\n" << biasOmegaCovariance << "\n]" << endl;
-}
+// Explicit instantiations for ConstantBias
+template struct PreintegrationCombinedParamsT<imuBias::ConstantBias>;
 
-//------------------------------------------------------------------------------
-bool PreintegrationCombinedParams::equals(
-    const PreintegratedRotationParams& other, double tol) const {
-  auto e = dynamic_cast<const PreintegrationCombinedParams*>(&other);
-  return e != nullptr && PreintegrationParams::equals(other, tol) &&
-         equal_with_abs_tol(biasAccCovariance, e->biasAccCovariance, tol) &&
-         equal_with_abs_tol(biasOmegaCovariance, e->biasOmegaCovariance, tol);
-}
+// Explicit instantiations for GaussMarkovBias
+template struct PreintegrationCombinedParamsT<imuBias::GaussMarkovBias>;
 
 }  // namespace gtsam

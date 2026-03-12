@@ -17,8 +17,9 @@
 
 #include "TangentPreintegration.h"
 
-#include <cmath>
 #include <gtsam/base/numericalDerivative.h>
+
+#include <cmath>
 
 using namespace std;
 
@@ -139,14 +140,17 @@ void TangentPreintegration<Bias>::update(const Vector3& measuredAcc,
   }
 
   // new_H_biasAcc = new_H_old * old_H_biasAcc + new_H_acc * acc_H_biasAcc
-  // new_H_biasOmega = new_H_old * old_H_biasOmega + new_H_omega * omega_H_biasOmega
-  // For ConstantBias: acc_H_biasAcc = omega_H_biasOmega = -I_3x3
-  // For GaussMarkovBias: acc_H_biasAcc = -beta_acc * I_3x3, omega_H_biasOmega = -beta_omega * I_3x3
+  // new_H_biasOmega = new_H_old * old_H_biasOmega + new_H_omega *
+  // omega_H_biasOmega For ConstantBias: acc_H_biasAcc = omega_H_biasOmega =
+  // -I_3x3 For GaussMarkovBias: acc_H_biasAcc = -beta_acc * I_3x3,
+  // omega_H_biasOmega = -beta_omega * I_3x3
   if constexpr (std::is_same_v<Bias, imuBias::GaussMarkovBias>) {
     const double beta_acc = std::exp(-dt / biasHat_.tauAcc());
     const double beta_omega = std::exp(-dt / biasHat_.tauGyro());
-    preintegrated_H_biasAcc_ = (*A) * preintegrated_H_biasAcc_ - beta_acc * (*B);
-    preintegrated_H_biasOmega_ = (*A) * preintegrated_H_biasOmega_ - beta_omega * (*C);
+    preintegrated_H_biasAcc_ =
+        (*A) * preintegrated_H_biasAcc_ - beta_acc * (*B);
+    preintegrated_H_biasOmega_ =
+        (*A) * preintegrated_H_biasOmega_ - beta_omega * (*C);
   } else {
     preintegrated_H_biasAcc_ = (*A) * preintegrated_H_biasAcc_ - (*B);
     preintegrated_H_biasOmega_ = (*A) * preintegrated_H_biasOmega_ - (*C);
@@ -250,7 +254,7 @@ void TangentPreintegration<Bias>::mergeWith(const TangentPreintegration& pim12,
   const Vector9 zeta01 = preintegrated();
   Vector9 zeta12 = pim12.preintegrated();  // will be modified.
 
-  const imuBias::ConstantBias bias_incr_for_12 = biasHat() - pim12.biasHat();
+  const Bias bias_incr_for_12 = biasHat() - pim12.biasHat();
   zeta12 += pim12.preintegrated_H_biasOmega_ * bias_incr_for_12.gyroscope() +
             pim12.preintegrated_H_biasAcc_ * bias_incr_for_12.accelerometer();
 
@@ -269,3 +273,4 @@ void TangentPreintegration<Bias>::mergeWith(const TangentPreintegration& pim12,
 
 // Explicit instantiation
 template class gtsam::TangentPreintegration<gtsam::imuBias::ConstantBias>;
+template class gtsam::TangentPreintegration<gtsam::imuBias::GaussMarkovBias>;

@@ -11,14 +11,13 @@
 
 /**
  * @file CombinedImuFactorsExample
- * @brief Test example for using GTSAM ImuCombinedFactor
- * navigation code.
+ * @brief Test example for using GTSAM CombinedImuFactor with either
+ * ConstantBias (random walk) or GaussMarkovBias.
  * @author Varun Agrawal
  */
 
 /**
- * Example of use of the CombinedImuFactor in
- * conjunction with GPS
+ * Example of use of the CombinedImuFactor in conjunction with GPS.
  *  - we read IMU and GPS data from a CSV file, with the following format:
  *  A row starting with "i" is the first initial position formatted with
  *  N, E, D, qx, qY, qZ, qW, velN, velE, velD
@@ -49,6 +48,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <type_traits>
 
 using namespace gtsam;
 using namespace std;
@@ -61,14 +61,16 @@ namespace po = boost::program_options;
 
 po::variables_map parseOptions(int argc, char* argv[]) {
   po::options_description desc;
-  desc.add_options()("help,h", "produce help message")  // help message
-      ("data_csv_path", po::value<string>()->default_value("imuAndGPSdata.csv"),
-       "path to the CSV file with the IMU data")  // path to the data file
-      ("output_filename",
-       po::value<string>()->default_value("imuFactorExampleResults.csv"),
-       "path to the result file to use")  // filename to save results to
-      ("use_isam", po::bool_switch(),
-       "use ISAM as the optimizer");  // flag for ISAM optimizer
+  desc.add_options()("help,h", "produce help message")(
+      "data_csv_path", po::value<string>()->default_value("imuAndGPSdata.csv"),
+      "path to the CSV file with the IMU data")(
+      "output_filename",
+      po::value<string>()->default_value("imuFactorExampleResults.csv"),
+      "path to the result file to use")("use_isam", po::bool_switch(),
+                                        "use ISAM as the optimizer")(
+      "gauss_markov", po::bool_switch(),
+      "use 1st-order Gauss-Markov bias model instead of constant (random walk) "
+      "bias");
 
   po::variables_map vm;
   po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -96,7 +98,10 @@ Vector10 readInitialState(ifstream& file) {
   return initial_state;
 }
 
-std::shared_ptr<PreintegratedCombinedMeasurements::Params> imuParams() {
+/// Build CombinedImuFactor params, templated on bias type.
+/// Uses identical noise values for both bias models.
+template <class BIAS>
+std::shared_ptr<PreintegrationCombinedParamsT<BIAS>> imuParams() {
   // We use the sensor specs to build the noise model for the IMU factor.
   double accel_noise_sigma = 0.0003924;
   double gyro_noise_sigma = 0.000205689024915;
@@ -109,13 +114,12 @@ std::shared_ptr<PreintegratedCombinedMeasurements::Params> imuParams() {
   Matrix33 bias_acc_cov = I_3x3 * pow(accel_bias_rw_sigma, 2);
   Matrix33 bias_omega_cov = I_3x3 * pow(gyro_bias_rw_sigma, 2);
 
-  auto p = PreintegratedCombinedMeasurements::Params::MakeSharedD(0.0);
+  auto p = PreintegrationCombinedParamsT<BIAS>::MakeSharedD(0.0);
   // PreintegrationBase params:
   p->accelerometerCovariance =
       measured_acc_cov;  // acc white noise in continuous
   p->integrationCovariance =
       integration_error_cov;  // integration uncertainty continuous
-  // should be using 2nd order integration
   // PreintegratedRotation params:
   p->gyroscopeCovariance =
       measured_omega_cov;  // gyro white noise in continuous
@@ -132,82 +136,66 @@ std::shared_ptr<PreintegratedCombinedMeasurements::Params> imuParams() {
   return p;
 }
 
-int main(int argc, char* argv[]) {
-  string data_filename, output_filename;
-  po::variables_map var_map = parseOptions(argc, argv);
+/// The main estimation loop, templated on bias type.
+template <class BIAS>
+int runEstimation(const string& data_filename, const string& output_filename) {
+  using Preintegration = ManifoldPreintegration<BIAS>;
+  using PIM = PreintegratedCombinedMeasurementsT<Preintegration, BIAS>;
+  using Factor = CombinedImuFactorT<PIM, BIAS>;
 
-  data_filename = findExampleDataFile(var_map["data_csv_path"].as<string>());
-  output_filename = var_map["output_filename"].as<string>();
-
-  // Set up output file for plotting errors
   FILE* fp_out = fopen(output_filename.c_str(), "w+");
   fprintf(fp_out,
-          "#time(s),x(m),y(m),z(m),qx,qy,qz,qw,gt_x(m),gt_y(m),gt_z(m),gt_qx,"
-          "gt_qy,gt_qz,gt_qw\n");
+          "#time(s),x(m),y(m),z(m),qx,qy,qz,qw,gt_x(m),gt_y(m),gt_z(m),gt_"
+          "qx,gt_qy,gt_qz,gt_qw\n");
 
-  // Begin parsing the CSV file.  Input the first line for initialization.
-  // From there, we'll iterate through the file and we'll preintegrate the IMU
-  // or add in the GPS given the input.
   ifstream file(data_filename.c_str());
-
   Vector10 initial_state = readInitialState(file);
   cout << "initial state:\n" << initial_state.transpose() << "\n\n";
 
-  // Assemble initial quaternion through GTSAM constructor
-  // ::Quaternion(w,x,y,z);
   Rot3 prior_rotation = Rot3::Quaternion(initial_state(6), initial_state(3),
                                          initial_state(4), initial_state(5));
   Point3 prior_point(initial_state.head<3>());
   Pose3 prior_pose(prior_rotation, prior_point);
   Vector3 prior_velocity(initial_state.tail<3>());
 
-  imuBias::ConstantBias prior_imu_bias;  // assume zero initial bias
+  // Create the initial bias — zero for both models.
+  BIAS prior_imu_bias;
+  if constexpr (std::is_same_v<BIAS, imuBias::GaussMarkovBias>) {
+    prior_imu_bias = imuBias::GaussMarkovBias(Vector3::Zero(), Vector3::Zero(),
+                                              300.0, 300.0);
+  }
 
   int index = 0;
-
   Values initial_values;
-
-  // insert pose at initialization
   initial_values.insert(X(index), prior_pose);
   initial_values.insert(V(index), prior_velocity);
   initial_values.insert(B(index), prior_imu_bias);
 
-  // Assemble prior noise model and add it the graph.`
+  // Identical priors for both models
   auto pose_noise_model = noiseModel::Diagonal::Sigmas(
       (Vector(6) << 0.01, 0.01, 0.01, 0.5, 0.5, 0.5)
           .finished());  // rad,rad,rad,m, m, m
   auto velocity_noise_model = noiseModel::Isotropic::Sigma(3, 0.1);  // m/s
   auto bias_noise_model = noiseModel::Isotropic::Sigma(6, 1e-3);
 
-  // Add all prior factors (pose, velocity, bias) to the graph.
   NonlinearFactorGraph graph;
   graph.addPrior<Pose3>(X(index), prior_pose, pose_noise_model);
   graph.addPrior<Vector3>(V(index), prior_velocity, velocity_noise_model);
-  graph.addPrior<imuBias::ConstantBias>(B(index), prior_imu_bias,
-                                        bias_noise_model);
+  graph.addPrior<BIAS>(B(index), prior_imu_bias, bias_noise_model);
 
-  auto p = imuParams();
-
-  std::shared_ptr<DefaultPreintegrationType> preintegrated =
-      std::make_shared<PreintegratedCombinedMeasurements>(p, prior_imu_bias);
-
+  auto p = imuParams<BIAS>();
+  auto preintegrated = std::make_shared<PIM>(p, prior_imu_bias);
   assert(preintegrated);
 
-  // Store previous state for imu integration and latest predicted outcome.
   NavState prev_state(prior_pose, prior_velocity);
   NavState prop_state = prev_state;
-  imuBias::ConstantBias prev_bias = prior_imu_bias;
+  BIAS prev_bias = prior_imu_bias;
 
-  // Keep track of total error over the entire run as simple performance metric.
   double current_position_error = 0.0, current_orientation_error = 0.0;
-
   double output_time = 0.0;
-  double dt = 0.005;  // The real system has noise, but here, results are nearly
-                      // exactly the same, so keeping this for simplicity.
+  double dt = 0.005;
 
-  // All priors have been set up, now iterate through the data file.
   while (file.good()) {
-    // Parse out first value
     string value;
     getline(file, value, ',');
     int type = stoi(value.c_str());
@@ -221,7 +209,6 @@ int main(int argc, char* argv[]) {
       getline(file, value, '\n');
       imu(5) = stof(value.c_str());
 
-      // Adding the IMU preintegration.
       preintegrated->integrateMeasurement(imu.head<3>(), imu.tail<3>(), dt);
 
     } else if (type == 1) {  // GPS measurement
@@ -235,24 +222,15 @@ int main(int argc, char* argv[]) {
 
       index++;
 
-      // Adding IMU factor and GPS factor and optimizing.
-      auto preint_imu_combined =
-          dynamic_cast<const PreintegratedCombinedMeasurements&>(
-              *preintegrated);
-      CombinedImuFactor imu_factor(X(index - 1), V(index - 1), X(index),
-                                   V(index), B(index - 1), B(index),
-                                   preint_imu_combined);
+      Factor imu_factor(X(index - 1), V(index - 1), X(index), V(index),
+                        B(index - 1), B(index), *preintegrated);
       graph.add(imu_factor);
 
       auto correction_noise = noiseModel::Isotropic::Sigma(3, 1.0);
-      GPSFactor gps_factor(X(index),
-                           Point3(gps(0),   // N,
-                                  gps(1),   // E,
-                                  gps(2)),  // D,
+      GPSFactor gps_factor(X(index), Point3(gps(0), gps(1), gps(2)),
                            correction_noise);
       graph.add(gps_factor);
 
-      // Now optimize and compare results.
       prop_state = preintegrated->predict(prev_state, prev_bias);
       initial_values.insert(X(index), prop_state.pose());
       initial_values.insert(V(index), prop_state.v());
@@ -263,15 +241,12 @@ int main(int argc, char* argv[]) {
       LevenbergMarquardtOptimizer optimizer(graph, initial_values, params);
       Values result = optimizer.optimize();
 
-      // Overwrite the beginning of the preintegration for the next step.
       prev_state =
           NavState(result.at<Pose3>(X(index)), result.at<Vector3>(V(index)));
-      prev_bias = result.at<imuBias::ConstantBias>(B(index));
+      prev_bias = result.at<BIAS>(B(index));
 
-      // Reset the preintegration object.
       preintegrated->resetIntegrationAndSetBias(prev_bias);
 
-      // Print out the position and orientation error for comparison.
       Vector3 result_position = prev_state.pose().translation();
       Vector3 position_error = result_position - gps.head<3>();
       current_position_error = position_error.norm();
@@ -284,7 +259,6 @@ int main(int argc, char* argv[]) {
                                 quat_error.z() * 2);
       current_orientation_error = euler_angle_error.norm();
 
-      // display statistics
       cout << "Position error:" << current_position_error << "\t "
            << "Angular error:" << current_orientation_error << "\n"
            << endl;
@@ -299,6 +273,7 @@ int main(int argc, char* argv[]) {
 
     } else {
       cerr << "ERROR parsing file\n";
+      fclose(fp_out);
       return 1;
     }
   }
@@ -306,4 +281,22 @@ int main(int argc, char* argv[]) {
   cout << "Complete, results written to " << output_filename << "\n\n";
 
   return 0;
+}
+
+int main(int argc, char* argv[]) {
+  po::variables_map var_map = parseOptions(argc, argv);
+
+  string data_filename =
+      findExampleDataFile(var_map["data_csv_path"].as<string>());
+  string output_filename = var_map["output_filename"].as<string>();
+  bool use_gauss_markov = var_map["gauss_markov"].as<bool>();
+
+  if (use_gauss_markov) {
+    printf("Using 1st-order Gauss-Markov bias model\n");
+    return runEstimation<imuBias::GaussMarkovBias>(data_filename,
+                                                   output_filename);
+  } else {
+    printf("Using constant (random walk) bias model\n");
+    return runEstimation<imuBias::ConstantBias>(data_filename, output_filename);
+  }
 }

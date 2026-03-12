@@ -27,9 +27,9 @@
 #include <gtsam/navigation/PreintegrationCombinedParams.h>
 #include <gtsam/navigation/TangentPreintegration.h>
 
-#include "gtsam/navigation/ImuBias.h"
-
 #include <ostream>
+
+#include "gtsam/navigation/ImuBias.h"
 
 namespace gtsam {
 
@@ -50,8 +50,6 @@ typedef TangentPreintegration<DefaultBiasType> DefaultPreintegrationType;
 #else
 typedef ManifoldPreintegration<DefaultBiasType> DefaultPreintegrationType;
 #endif
-
-typedef imuBias::ConstantBias DefaultBiasType;
 
 /*
  * If you are using the factor, please cite:
@@ -87,7 +85,7 @@ template <class PreintegrationType, class BiasType>
 class GTSAM_EXPORT PreintegratedCombinedMeasurementsT
     : public PreintegrationType {
  public:
-  typedef PreintegrationCombinedParams Params;
+  typedef PreintegrationCombinedParamsT<BiasType> Params;
 
  protected:
   /* Covariance matrix of the preintegrated measurements
@@ -488,7 +486,12 @@ void PreintegratedCombinedMeasurementsT<PreintegrationType, BiasType>::
   F.block<3, 3>(0, 12) = theta_H_omega;
   F.block<3, 3>(3, 9) = pos_H_acc;
   F.block<3, 3>(6, 9) = vel_H_acc;
-  F.block<6, 6>(9, 9) = I_6x6;
+
+  // Bias state transition:
+  //   ConstantBias  (random walk):   I_6x6
+  //   GaussMarkovBias (1st-order GM): diag(exp(-dt/tauAcc)*I3,
+  //                                        exp(-dt/tauGyro)*I3)
+  F.block<6, 6>(9, 9) = this->p().biasFTransition(dt, this->biasHat_);
 
   preintMeasCov_ = F * preintMeasCov_ * F.transpose();
 
@@ -504,14 +507,20 @@ void PreintegratedCombinedMeasurementsT<PreintegrationType, BiasType>::
   D_t_t(&G_measCov_Gt) =
       (pos_H_acc * (aCov / dt) * pos_H_acc.transpose()) + (dt * iCov);
   D_v_v(&G_measCov_Gt) = (vel_H_acc * (aCov / dt) * vel_H_acc.transpose());
-  D_a_a(&G_measCov_Gt) = dt * this->p().biasAccCovariance;
-  D_g_g(&G_measCov_Gt) = dt * this->p().biasOmegaCovariance;
+
+  // Bias process noise:
+  //   ConstantBias:     Q_c * dt
+  //   GaussMarkovBias:  Q_c * (1 - exp(-2*dt/tau)) / 2
+  D_a_a(&G_measCov_Gt) =
+      this->p().discreteBiasAccCovariance(dt, this->biasHat_);
+  D_g_g(&G_measCov_Gt) =
+      this->p().discreteBiasOmegaCovariance(dt, this->biasHat_);
+
   D_t_v(&G_measCov_Gt) = (pos_H_acc * (aCov / dt) * vel_H_acc.transpose());
   D_v_t(&G_measCov_Gt) = (vel_H_acc * (aCov / dt) * pos_H_acc.transpose());
 
   preintMeasCov_.noalias() += G_measCov_Gt;
 }
-
 #undef D_R_R
 #undef D_R_t
 #undef D_R_v
