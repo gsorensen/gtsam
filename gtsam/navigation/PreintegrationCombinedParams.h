@@ -143,12 +143,19 @@ struct GTSAM_EXPORT PreintegrationCombinedParamsT : PreintegrationParams {
    * Compute the discrete process-noise covariance for the accelerometer bias
    * block (3x3) over an integration step of size dt.
    *
+   * For a 1st-order Gauss-Markov process  dx = -x/tau dt + sigma_c dW,
+   * the exact discrete noise covariance is:
+   *   Q_d = sigma_c^2 * (tau/2) * (1 - exp(-2*dt/tau))
+   *
+   * biasAccCovariance is sigma_c^2 (continuous PSD, same as ConstantBias).
+   *
    * ConstantBias:     Q_d = biasAccCovariance * dt
-   * GaussMarkovBias:  Q_d = biasAccCovariance * (1 - exp(-2*dt/tauAcc)) / 2
+   * GaussMarkovBias:  Q_d = biasAccCovariance * (tau/2) * (1 - exp(-2*dt/tau))
    */
   Matrix3 discreteBiasAccCovariance(double dt, const BIAS& biasHat) const {
     if constexpr (std::is_same_v<BIAS, imuBias::GaussMarkovBias>) {
-      const double scale = (1.0 - std::exp(-2.0 * dt / biasHat.tauAcc())) / 2.0;
+      const double tau = biasHat.tauAcc();
+      const double scale = (tau / 2.0) * (1.0 - std::exp(-2.0 * dt / tau));
       return biasAccCovariance * scale;
     } else {
       (void)biasHat;
@@ -161,12 +168,12 @@ struct GTSAM_EXPORT PreintegrationCombinedParamsT : PreintegrationParams {
    * block (3x3) over an integration step of size dt.
    *
    * ConstantBias:     Q_d = biasOmegaCovariance * dt
-   * GaussMarkovBias:  Q_d = biasOmegaCovariance * (1 - exp(-2*dt/tauGyro)) / 2
+   * GaussMarkovBias:  Q_d = biasOmegaCovariance * (tau/2) * (1 - exp(-2*dt/tau))
    */
   Matrix3 discreteBiasOmegaCovariance(double dt, const BIAS& biasHat) const {
     if constexpr (std::is_same_v<BIAS, imuBias::GaussMarkovBias>) {
-      const double scale =
-          (1.0 - std::exp(-2.0 * dt / biasHat.tauGyro())) / 2.0;
+      const double tau = biasHat.tauGyro();
+      const double scale = (tau / 2.0) * (1.0 - std::exp(-2.0 * dt / tau));
       return biasOmegaCovariance * scale;
     } else {
       (void)biasHat;

@@ -65,9 +65,11 @@ void ManifoldPreintegration<Bias>::update(const Vector3& measuredAcc,
   // Correct for bias in the sensor frame
   Vector3 acc, omega;
   if constexpr (std::is_same_v<Bias, imuBias::GaussMarkovBias>) {
-    // For ConstantBias, we can use the more efficient correction functions
-    acc = biasHat_.correctAccelerometer(measuredAcc, dt);
-    omega = biasHat_.correctGyroscope(measuredOmega, dt);
+    // For GaussMarkovBias, the bias decays over the preintegration interval.
+    // At time t_k from start, bias = exp(-t_k/tau) * biasHat.
+    // deltaTij_ is the accumulated time *before* this step (not yet updated).
+    acc = biasHat_.correctAccelerometer(measuredAcc, deltaTij_);
+    omega = biasHat_.correctGyroscope(measuredOmega, deltaTij_);
   } else {
     acc = biasHat_.correctAccelerometer(measuredAcc);
     omega = biasHat_.correctGyroscope(measuredOmega);
@@ -115,8 +117,11 @@ void ManifoldPreintegration<Bias>::update(const Vector3& measuredAcc,
   // For GaussMarkovBias: acc_H_biasAcc = -beta_acc * I, omega_H_biasOmega =
   // -beta_omega * I
   if constexpr (std::is_same_v<Bias, imuBias::GaussMarkovBias>) {
-    const double beta_acc = std::exp(-dt / biasHat_.tauAcc());
-    const double beta_omega = std::exp(-dt / biasHat_.tauGyro());
+    // Use accumulated time at the measurement point (deltaTij_ was already
+    // incremented above, so subtract dt to get the time of this measurement).
+    const double t_k = deltaTij_ - dt;
+    const double beta_acc = std::exp(-t_k / biasHat_.tauAcc());
+    const double beta_omega = std::exp(-t_k / biasHat_.tauGyro());
     delRdelBiasOmega_ =
         incrRt * delRdelBiasOmega_ - beta_omega * D_incrR_integratedOmega * dt;
     delPdelBiasAcc_ += delVdelBiasAcc_ * dt - beta_acc * dt22 * dRij;
