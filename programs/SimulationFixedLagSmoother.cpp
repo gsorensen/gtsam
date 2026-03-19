@@ -314,6 +314,8 @@ void run_estimation(const SimulationData& sd) {
   std::vector<Eigen::Vector3d> att_err, acc_bias_err, gyro_bias_err;
   std::vector<gtsam::Rot3> est_att;
   std::vector<Eigen::Vector3d> est_acc_bias, est_gyro_bias;
+  // 3-sigma bounds (15 states: att_rpy(3), pos_ned(3), vel_ned(3), ab(3), gb(3))
+  std::vector<Eigen::Matrix<double, 15, 1>> three_sigma;
   est_pos.push_back(p0);
   est_vel.push_back(v0);
   est_att.push_back(R0);
@@ -434,6 +436,41 @@ void run_estimation(const SimulationData& sd) {
       acc_bias_err.push_back(ab_err);
       gyro_bias_err.push_back(gb_err);
 
+      // Extract 3-sigma bounds from marginal covariances
+      // Pose3 cov is 6x6: [rot(3), pos(3)]; Vel is 3x3; Bias is 6x6: [acc(3), gyro(3)]
+      Eigen::Matrix<double, 15, 1> sig3;
+      try {
+        gtsam::Matrix pose_cov =
+            smoother.marginalCovariance(X(correction_count));
+        gtsam::Matrix vel_cov =
+            smoother.marginalCovariance(V(correction_count));
+        gtsam::Matrix bias_cov =
+            smoother.marginalCovariance(B(correction_count));
+        // roll, pitch, yaw (rotation block, indices 0-2)
+        sig3(0) = 3.0 * std::sqrt(pose_cov(0, 0));
+        sig3(1) = 3.0 * std::sqrt(pose_cov(1, 1));
+        sig3(2) = 3.0 * std::sqrt(pose_cov(2, 2));
+        // N, E, D position (translation block, indices 3-5)
+        sig3(3) = 3.0 * std::sqrt(pose_cov(3, 3));
+        sig3(4) = 3.0 * std::sqrt(pose_cov(4, 4));
+        sig3(5) = 3.0 * std::sqrt(pose_cov(5, 5));
+        // N, E, D velocity
+        sig3(6) = 3.0 * std::sqrt(vel_cov(0, 0));
+        sig3(7) = 3.0 * std::sqrt(vel_cov(1, 1));
+        sig3(8) = 3.0 * std::sqrt(vel_cov(2, 2));
+        // acc bias x, y, z
+        sig3(9) = 3.0 * std::sqrt(bias_cov(0, 0));
+        sig3(10) = 3.0 * std::sqrt(bias_cov(1, 1));
+        sig3(11) = 3.0 * std::sqrt(bias_cov(2, 2));
+        // gyro bias x, y, z
+        sig3(12) = 3.0 * std::sqrt(bias_cov(3, 3));
+        sig3(13) = 3.0 * std::sqrt(bias_cov(4, 4));
+        sig3(14) = 3.0 * std::sqrt(bias_cov(5, 5));
+      } catch (const std::exception& e) {
+        sig3.setZero();
+      }
+      three_sigma.push_back(sig3);
+
       if (correction_count % 100 == 0) {
         printf("Step %llu/%llu | Pos: %.4f m | Vel: %.4f m/s | Att: %.4f deg\n",
                static_cast<unsigned long long>(idx),
@@ -460,7 +497,12 @@ void run_estimation(const SimulationData& sd) {
       << "pos_err_n,pos_err_e,pos_err_d,vel_err_n,vel_err_e,vel_err_d,"
       << "att_err_roll,att_err_pitch,att_err_yaw,"
       << "acc_bias_err_x,acc_bias_err_y,acc_bias_err_z,"
-      << "gyro_bias_err_x,gyro_bias_err_y,gyro_bias_err_z\n";
+      << "gyro_bias_err_x,gyro_bias_err_y,gyro_bias_err_z,"
+      << "sig3_roll,sig3_pitch,sig3_yaw,"
+      << "sig3_pos_n,sig3_pos_e,sig3_pos_d,"
+      << "sig3_vel_n,sig3_vel_e,sig3_vel_d,"
+      << "sig3_ab_x,sig3_ab_y,sig3_ab_z,"
+      << "sig3_gb_x,sig3_gb_y,sig3_gb_z\n";
 
   size_t n_results = std::min(est_pos.size(), pos_err.size());
   for (size_t i = 0; i < n_results; ++i) {
@@ -472,17 +514,26 @@ void run_estimation(const SimulationData& sd) {
     const auto& ae = att_err[i];
     const auto& abe = acc_bias_err[i];
     const auto& gbe = gyro_bias_err[i];
-    char buf[1024];
+    const auto& s3 = three_sigma[i];
+    char buf[2048];
     snprintf(buf, sizeof(buf),
              "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
              "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
              "%.6f,%.6f,%.6f,"
              "%.6f,%.6f,%.6f,"
-             "%.6f,%.6f,%.6f\n",
+             "%.6f,%.6f,%.6f,"
+             "%.8f,%.8f,%.8f,"
+             "%.8f,%.8f,%.8f,"
+             "%.8f,%.8f,%.8f,"
+             "%.8f,%.8f,%.8f,"
+             "%.8f,%.8f,%.8f\n",
              ep.x(), ep.y(), ep.z(), ev.x(), ev.y(), ev.z(), ea.roll(),
              ea.pitch(), ea.yaw(), pe.x(), pe.y(), pe.z(), ve.x(), ve.y(),
              ve.z(), ae.x(), ae.y(), ae.z(), abe.x(), abe.y(), abe.z(),
-             gbe.x(), gbe.y(), gbe.z());
+             gbe.x(), gbe.y(), gbe.z(),
+             s3(0), s3(1), s3(2), s3(3), s3(4), s3(5),
+             s3(6), s3(7), s3(8), s3(9), s3(10), s3(11),
+             s3(12), s3(13), s3(14));
     out << buf;
   }
 
