@@ -305,9 +305,13 @@ void run_estimation(const SimulationData& sd) {
   Eigen::MatrixXd gnss_pos = sd.gnss_pos();
   Eigen::MatrixXd true_pos = sd.true_pos();
   Eigen::MatrixXd true_vel = sd.true_vel();
+  Eigen::MatrixXd true_att = sd.true_att();       // 4 x N (qx, qy, qz, qw)
+  Eigen::MatrixXd true_ab = sd.true_acc_bias();   // 3 x N
+  Eigen::MatrixXd true_gb = sd.true_gyro_bias();  // 3 x N
 
   // Result storage
   std::vector<Eigen::Vector3d> est_pos, est_vel, pos_err, vel_err;
+  std::vector<Eigen::Vector3d> att_err, acc_bias_err, gyro_bias_err;
   std::vector<gtsam::Rot3> est_att;
   std::vector<Eigen::Vector3d> est_acc_bias, est_gyro_bias;
   est_pos.push_back(p0);
@@ -407,14 +411,35 @@ void run_estimation(const SimulationData& sd) {
           prev_state.v() -
           Eigen::Vector3d(true_vel(0, idx), true_vel(1, idx),
                           true_vel(2, idx));
+
+      // Attitude error (Euler angles): R_err = R_true^T * R_est
+      gtsam::Rot3 R_true = gtsam::Rot3::Quaternion(
+          true_att(3, idx), true_att(0, idx), true_att(1, idx), true_att(2, idx));
+      Eigen::Vector3d a_err(
+          ssa(prev_state.pose().rotation().roll() - R_true.roll()),
+          ssa(prev_state.pose().rotation().pitch() - R_true.pitch()),
+          ssa(prev_state.pose().rotation().yaw() - R_true.yaw()));
+
+      // Bias errors
+      Eigen::Vector3d ab_err =
+          prev_bias_estimate.accelerometer() -
+          Eigen::Vector3d(true_ab(0, idx), true_ab(1, idx), true_ab(2, idx));
+      Eigen::Vector3d gb_err =
+          prev_bias_estimate.gyroscope() -
+          Eigen::Vector3d(true_gb(0, idx), true_gb(1, idx), true_gb(2, idx));
+
       pos_err.push_back(p_err);
       vel_err.push_back(v_err);
+      att_err.push_back(a_err);
+      acc_bias_err.push_back(ab_err);
+      gyro_bias_err.push_back(gb_err);
 
       if (correction_count % 100 == 0) {
-        printf("Step %llu/%llu | Pos error: %.4f m | Vel error: %.4f m/s\n",
+        printf("Step %llu/%llu | Pos: %.4f m | Vel: %.4f m/s | Att: %.4f deg\n",
                static_cast<unsigned long long>(idx),
                static_cast<unsigned long long>(sd.N),
-               p_err.norm(), v_err.norm());
+               p_err.norm(), v_err.norm(),
+               rad2deg(a_err.norm()));
       }
     }
   }
@@ -432,7 +457,10 @@ void run_estimation(const SimulationData& sd) {
   }
 
   out << "pos_n,pos_e,pos_d,vel_n,vel_e,vel_d,roll,pitch,yaw,"
-      << "pos_err_n,pos_err_e,pos_err_d,vel_err_n,vel_err_e,vel_err_d\n";
+      << "pos_err_n,pos_err_e,pos_err_d,vel_err_n,vel_err_e,vel_err_d,"
+      << "att_err_roll,att_err_pitch,att_err_yaw,"
+      << "acc_bias_err_x,acc_bias_err_y,acc_bias_err_z,"
+      << "gyro_bias_err_x,gyro_bias_err_y,gyro_bias_err_z\n";
 
   size_t n_results = std::min(est_pos.size(), pos_err.size());
   for (size_t i = 0; i < n_results; ++i) {
@@ -441,13 +469,20 @@ void run_estimation(const SimulationData& sd) {
     const auto& ea = est_att[i + 1];
     const auto& pe = pos_err[i];
     const auto& ve = vel_err[i];
-    char buf[512];
+    const auto& ae = att_err[i];
+    const auto& abe = acc_bias_err[i];
+    const auto& gbe = gyro_bias_err[i];
+    char buf[1024];
     snprintf(buf, sizeof(buf),
              "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
-             "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n",
+             "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
+             "%.6f,%.6f,%.6f,"
+             "%.6f,%.6f,%.6f,"
+             "%.6f,%.6f,%.6f\n",
              ep.x(), ep.y(), ep.z(), ev.x(), ev.y(), ev.z(), ea.roll(),
              ea.pitch(), ea.yaw(), pe.x(), pe.y(), pe.z(), ve.x(), ve.y(),
-             ve.z());
+             ve.z(), ae.x(), ae.y(), ae.z(), abe.x(), abe.y(), abe.z(),
+             gbe.x(), gbe.y(), gbe.z());
     out << buf;
   }
 
