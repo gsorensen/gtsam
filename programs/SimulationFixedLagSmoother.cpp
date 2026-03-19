@@ -141,10 +141,10 @@ struct SimulationData {
   auto A_acc_bias() const -> double { return data(0, 45); }
   auto A_gyro_bias() const -> double { return data(0, 49); }
 
-  // PARS beacon measurements: z = [azimuth, elevation, range] per locator
+  // PARS beacon measurements: z = [range, elevation, azimuth] per locator
   struct PARSBeacon {
     size_t id;
-    Eigen::MatrixXd z;       // 3 x N (azimuth, elevation, range)
+    Eigen::MatrixXd z;       // 3 x N (range, elevation, azimuth)
     Eigen::Vector3d origin;  // locator position in NED
   };
 
@@ -366,9 +366,9 @@ void run_estimation(const SimulationData& sd) {
         graph.add(gps_factor);
       } else if (active_aiding == Aiding::PARSFull) {
         for (const auto& beacon : beacons) {
-          double azimuth = beacon.z(0, idx);
+          double range = beacon.z(0, idx);
           double elevation = beacon.z(1, idx);
-          double range = beacon.z(2, idx);
+          double azimuth = beacon.z(2, idx);
 
           graph.add(PARS::RangeFactor<gtsam::Pose3>(
               X(correction_count), range_noise, range, beacon.origin));
