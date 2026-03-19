@@ -68,8 +68,8 @@ constexpr double gnss_bootstrap_duration = 150.0;
 const std::string input_file =
     "/Users/ghms/ws/ntnu/parnav_ins_sim/data/"
     "otter_simulation_data_01_100Hz_noisy_biased_aided_at_10Hz_cpp.csv";
-const std::string output_file =
-    "/Users/ghms/ws/ntnu/parnav_ins_sim/results/gtsam_fork_test.csv";
+const std::string output_dir =
+    "/Users/ghms/ws/ntnu/parnav_ins_sim/results/";
 
 // ============================================================================
 // Minimal CSV parsing
@@ -482,6 +482,9 @@ void run_estimation(const SimulationData& sd) {
          sd.N * dt);
 
   // --- Export results to CSV ---
+  std::string bias_tag =
+      std::is_same_v<BIAS, gtsam::imuBias::GaussMarkovBias> ? "gm" : "cb";
+  std::string output_file = output_dir + "gtsam_fork_test_" + bias_tag + ".csv";
   std::ofstream out(output_file);
   if (!out) {
     std::cerr << "Error: Could not open output file " << output_file << "\n";

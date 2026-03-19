@@ -1,27 +1,69 @@
 #!/usr/bin/env python3
-"""Plot estimation errors with 3-sigma bounds in a 5x3 grid."""
+"""Plot estimation errors with 3-sigma bounds in a 5x3 grid.
+
+Supports comparing Gauss-Markov and Constant Bias results side by side.
+If both files exist, both are plotted on the same axes.
+"""
 
 import argparse
-import sys
+import os
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+# ============================================================================
+# Configuration
+# ============================================================================
+
+# Plot order: the first entry is drawn on top (in front).
+# Swap the two entries to change which model is plotted in front.
+PLOT_ORDER = [
+    ("gm", "Gauss-Markov", "blue", "red"),
+    ("cb", "Constant Bias", "green", "orange"),
+]
+
+RESULTS_DIR = "/Users/ghms/ws/ntnu/parnav_ins_sim/results"
+
+# ============================================================================
+
 
 def main():
     parser = argparse.ArgumentParser(description="Plot 3-sigma error bounds")
     parser.add_argument(
-        "csv",
-        nargs="?",
-        default="/Users/ghms/ws/ntnu/parnav_ins_sim/results/gtsam_fork_test.csv",
-        help="Path to the results CSV file",
+        "--dir",
+        default=RESULTS_DIR,
+        help="Directory containing gtsam_fork_test_{gm,cb}.csv",
+    )
+    parser.add_argument(
+        "--csv",
+        nargs="*",
+        help="Explicit CSV file path(s). Overrides --dir auto-detection.",
     )
     args = parser.parse_args()
 
-    df = pd.read_csv(args.csv)
-    n = len(df)
-    t = np.arange(n) * 0.1  # 10 Hz update rate
+    # Build list of (label, dataframe, err_color, sig_color)
+    datasets = []
+
+    if args.csv:
+        # Explicit files provided
+        for path in args.csv:
+            tag = "gm" if "_gm" in os.path.basename(path) else "cb"
+            entry = next((e for e in PLOT_ORDER if e[0] == tag), PLOT_ORDER[0])
+            df = pd.read_csv(path)
+            datasets.append((entry[1], df, entry[2], entry[3]))
+    else:
+        # Auto-detect from results directory, respecting PLOT_ORDER
+        # Draw back-to-front: last in list is drawn last (on top)
+        for tag, label, err_col, sig_col in reversed(PLOT_ORDER):
+            path = os.path.join(args.dir, f"gtsam_fork_test_{tag}.csv")
+            if os.path.exists(path):
+                df = pd.read_csv(path)
+                datasets.append((label, df, err_col, sig_col))
+
+    if not datasets:
+        print(f"No result files found in {args.dir}")
+        return
 
     rad2deg = np.degrees
 
@@ -49,37 +91,49 @@ def main():
         ("gyro_bias_err_z", "sig3_gb_z", "Gyro bias z", "deg/s", True),
     ]
 
+    n_datasets = len(datasets)
+    title = " vs ".join(d[0] for d in datasets) if n_datasets > 1 else datasets[0][0]
     fig, axes = plt.subplots(5, 3, figsize=(16, 14), sharex=True)
-    fig.suptitle("Estimation errors with 3-sigma bounds", fontsize=14)
+    fig.suptitle(f"Estimation errors with 3-sigma bounds — {title}", fontsize=14)
 
     for i, (err_col, sig_col, label, unit, to_deg) in enumerate(grid):
         row, col = divmod(i, 3)
         ax = axes[row, col]
 
-        err = df[err_col].values
-        sig3 = df[sig_col].values
+        for ds_label, df, color_err, color_sig in datasets:
+            n = len(df)
+            t = np.arange(n) * 0.1
 
-        if to_deg:
-            err = rad2deg(err)
-            sig3 = rad2deg(sig3)
+            err = df[err_col].values
+            sig3 = df[sig_col].values
 
-        ax.plot(t, err, "b-", linewidth=0.6, label="Error")
-        ax.plot(t, sig3, "r--", linewidth=0.8, label="+3$\\sigma$")
-        ax.plot(t, -sig3, "r--", linewidth=0.8, label="-3$\\sigma$")
-        ax.fill_between(t, -sig3, sig3, color="red", alpha=0.08)
+            if to_deg:
+                err = rad2deg(err)
+                sig3 = rad2deg(sig3)
+
+            suffix = f" ({ds_label})" if n_datasets > 1 else ""
+            ax.plot(t, err, color=color_err, linewidth=0.6,
+                    label=f"Error{suffix}")
+            ax.plot(t, sig3, color=color_sig, linestyle="--", linewidth=0.8,
+                    label=f"+3$\\sigma${suffix}")
+            ax.plot(t, -sig3, color=color_sig, linestyle="--", linewidth=0.8,
+                    label=f"-3$\\sigma${suffix}")
+            ax.fill_between(t, -sig3, sig3, color=color_sig, alpha=0.06)
 
         ax.set_ylabel(f"{label} [{unit}]", fontsize=8)
         ax.tick_params(labelsize=7)
         ax.grid(True, alpha=0.3)
 
         if row == 0 and col == 2:
-            ax.legend(fontsize=7, loc="upper right")
+            ax.legend(fontsize=6, loc="upper right", ncol=n_datasets)
 
     for ax in axes[-1, :]:
         ax.set_xlabel("Time [s]", fontsize=9)
 
     plt.tight_layout()
-    plt.savefig(args.csv.replace(".csv", "_3sigma.png"), dpi=150)
+    out_name = os.path.join(args.dir, "3sigma_comparison.png")
+    plt.savefig(out_name, dpi=150)
+    print(f"Saved to {out_name}")
     plt.show()
 
 
