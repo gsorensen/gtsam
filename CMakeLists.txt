@@ -156,6 +156,9 @@ if (GTSAM_BUILD_UNSTABLE)
   add_subdirectory(gtsam_unstable)
 endif()
 
+# Build programs
+add_subdirectory(programs)
+
 # This is the new wrapper
 if(GTSAM_BUILD_PYTHON OR GTSAM_INSTALL_MATLAB_TOOLBOX)
     # Need to set this for the wrap package so we don't use the default value.
