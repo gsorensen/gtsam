@@ -18,9 +18,9 @@
 #include <gtsam/navigation/ImuBias.h>
 #include <gtsam/navigation/NavState.h>
 #include <gtsam/nonlinear/ISAM2.h>
+#include <gtsam/nonlinear/IncrementalFixedLagSmoother.h>
 #include <gtsam/nonlinear/NonlinearFactorGraph.h>
 #include <gtsam/nonlinear/Values.h>
-#include <gtsam/nonlinear/IncrementalFixedLagSmoother.h>
 
 #include <Eigen/Core>
 #include <chrono>
@@ -47,7 +47,7 @@ using gtsam::symbol_shorthand::X;
 // ============================================================================
 
 /// Toggle Gauss-Markov bias model (true) vs constant/random-walk bias (false)
-constexpr bool use_gauss_markov = false;
+constexpr bool use_gauss_markov = true;
 
 /// Gauss-Markov correlation times [s] (only used when use_gauss_markov = true)
 constexpr double tau_acc = 3600.0;
@@ -62,7 +62,7 @@ constexpr Aiding aiding_scheme = Aiding::PARSFull;
 
 /// GNSS bootstrap duration [s] — when using PARS, GNSS is used for the first
 /// N seconds to initialise the filter before switching to PARS aiding.
-constexpr double gnss_bootstrap_duration = 10.0;
+constexpr double gnss_bootstrap_duration = 150.0;
 
 /// Input/output paths
 const std::string input_file =
@@ -80,9 +80,7 @@ struct SimulationData {
   Eigen::MatrixXd data;
 
   // Simulation parameters
-  auto freq() const -> uint16_t {
-    return static_cast<uint16_t>(data(0, 30));
-  }
+  auto freq() const -> uint16_t { return static_cast<uint16_t>(data(0, 30)); }
   auto aiding_freq() const -> uint16_t {
     return static_cast<uint16_t>(data(0, 31));
   }
@@ -184,10 +182,9 @@ auto read_simulation_csv(const std::string& filename)
 
   SimulationData sd;
   sd.N = rows;
-  sd.data = Eigen::Map<
-      const Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic,
-                          Eigen::RowMajor>>(values.data(), rows,
-                                            values.size() / rows);
+  sd.data = Eigen::Map<const Eigen::Matrix<double, Eigen::Dynamic,
+                                           Eigen::Dynamic, Eigen::RowMajor>>(
+      values.data(), rows, values.size() / rows);
   return sd;
 }
 
@@ -216,13 +213,11 @@ void run_estimation(const SimulationData& sd) {
   double sigma_q = (arw / 60.0) * deg2rad(1.0);
   double sigma_b_acc =
       std::sqrt((2.0 / T_acc) * (bias_instability_acc * (g0 / 1000.0)));
-  double sigma_b_ars = std::sqrt((2.0 / T_ars) * (bias_instability_ars /
-                                                    3600.0) *
-                                  deg2rad(1.0));
+  double sigma_b_ars =
+      std::sqrt((2.0 / T_ars) * (bias_instability_ars / 3600.0) * deg2rad(1.0));
 
   // Preintegration params
-  auto p =
-      gtsam::PreintegrationCombinedParamsT<BIAS>::MakeSharedD(g0);
+  auto p = gtsam::PreintegrationCombinedParamsT<BIAS>::MakeSharedD(g0);
   p->accelerometerCovariance = gtsam::I_3x3 * sigma_v * sigma_v;
   p->gyroscopeCovariance = gtsam::I_3x3 * sigma_q * sigma_q;
   p->integrationCovariance = gtsam::I_3x3 * 1e-10;
@@ -231,7 +226,7 @@ void run_estimation(const SimulationData& sd) {
 
   // --- Initial state ---
   Eigen::Vector4d q0 = sd.init_att();  // qx, qy, qz, qw
-  gtsam::Rot3 R0 = gtsam::Rot3::Quaternion(q0(3), q0(0), q0(1), q0(2));
+  gtsam::Rot3 R0 = gtsam::Rot3::Quaternion(q0(0), q0(1), q0(2), q0(3));
   gtsam::Point3 p0 = sd.init_pos();
   gtsam::Pose3 pose0(R0, p0);
   gtsam::Vector3 v0 = sd.init_vel();
@@ -258,7 +253,7 @@ void run_estimation(const SimulationData& sd) {
       (gtsam::Vector(3) << 1.5, 1.5, 3.0).finished());
 
   // PARS noise models
-  double sigma_range = 5.0;
+  double sigma_range = 5;
   double sigma_azimuth = 7.0 * deg2rad(1.0);
   double sigma_elevation = 7.0 * deg2rad(1.0);
   auto range_noise = gtsam::noiseModel::Isotropic::Sigma(1, sigma_range);
@@ -314,7 +309,8 @@ void run_estimation(const SimulationData& sd) {
   std::vector<Eigen::Vector3d> att_err, acc_bias_err, gyro_bias_err;
   std::vector<gtsam::Rot3> est_att;
   std::vector<Eigen::Vector3d> est_acc_bias, est_gyro_bias;
-  // 3-sigma bounds (15 states: att_rpy(3), pos_ned(3), vel_ned(3), ab(3), gb(3))
+  // 3-sigma bounds (15 states: att_rpy(3), pos_ned(3), vel_ned(3), ab(3),
+  // gb(3))
   std::vector<Eigen::Matrix<double, 15, 1>> three_sigma;
   est_pos.push_back(p0);
   est_vel.push_back(v0);
@@ -360,9 +356,9 @@ void run_estimation(const SimulationData& sd) {
 
       // Determine active aiding: when using PARS, bootstrap with GNSS first
       bool in_bootstrap = (timestamp < gnss_bootstrap_duration);
-      Aiding active_aiding =
-          (aiding_scheme == Aiding::PARSFull && in_bootstrap) ? Aiding::GNSS
-                                                              : aiding_scheme;
+      Aiding active_aiding = (aiding_scheme == Aiding::PARSFull && in_bootstrap)
+                                 ? Aiding::GNSS
+                                 : aiding_scheme;
 
       // Add aiding factors
       if (active_aiding == Aiding::GNSS) {
@@ -390,9 +386,9 @@ void run_estimation(const SimulationData& sd) {
 
       // Extract results
       gtsam::Values result = smoother.calculateEstimate();
-      prev_state = gtsam::NavState(
-          result.at<gtsam::Pose3>(X(correction_count)),
-          result.at<gtsam::Vector3>(V(correction_count)));
+      prev_state =
+          gtsam::NavState(result.at<gtsam::Pose3>(X(correction_count)),
+                          result.at<gtsam::Vector3>(V(correction_count)));
       prev_bias_estimate = result.at<BIAS>(B(correction_count));
 
       preintegrated->resetIntegrationAndSetBias(prev_bias_estimate);
@@ -407,16 +403,15 @@ void run_estimation(const SimulationData& sd) {
       // Compute errors
       Eigen::Vector3d p_err =
           prev_state.pose().translation() -
-          Eigen::Vector3d(true_pos(0, idx), true_pos(1, idx),
-                          true_pos(2, idx));
+          Eigen::Vector3d(true_pos(0, idx), true_pos(1, idx), true_pos(2, idx));
       Eigen::Vector3d v_err =
           prev_state.v() -
-          Eigen::Vector3d(true_vel(0, idx), true_vel(1, idx),
-                          true_vel(2, idx));
+          Eigen::Vector3d(true_vel(0, idx), true_vel(1, idx), true_vel(2, idx));
 
       // Attitude error (Euler angles): R_err = R_true^T * R_est
-      gtsam::Rot3 R_true = gtsam::Rot3::Quaternion(
-          true_att(3, idx), true_att(0, idx), true_att(1, idx), true_att(2, idx));
+      gtsam::Rot3 R_true =
+          gtsam::Rot3::Quaternion(true_att(0, idx), true_att(1, idx),
+                                  true_att(2, idx), true_att(3, idx));
       Eigen::Vector3d a_err(
           ssa(prev_state.pose().rotation().roll() - R_true.roll()),
           ssa(prev_state.pose().rotation().pitch() - R_true.pitch()),
@@ -437,7 +432,8 @@ void run_estimation(const SimulationData& sd) {
       gyro_bias_err.push_back(gb_err);
 
       // Extract 3-sigma bounds from marginal covariances
-      // Pose3 cov is 6x6: [rot(3), pos(3)]; Vel is 3x3; Bias is 6x6: [acc(3), gyro(3)]
+      // Pose3 cov is 6x6: [rot(3), pos(3)]; Vel is 3x3; Bias is 6x6: [acc(3),
+      // gyro(3)]
       Eigen::Matrix<double, 15, 1> sig3;
       try {
         gtsam::Matrix pose_cov =
@@ -474,9 +470,8 @@ void run_estimation(const SimulationData& sd) {
       if (correction_count % 100 == 0) {
         printf("Step %llu/%llu | Pos: %.4f m | Vel: %.4f m/s | Att: %.4f deg\n",
                static_cast<unsigned long long>(idx),
-               static_cast<unsigned long long>(sd.N),
-               p_err.norm(), v_err.norm(),
-               rad2deg(a_err.norm()));
+               static_cast<unsigned long long>(sd.N), p_err.norm(),
+               v_err.norm(), rad2deg(a_err.norm()));
       }
     }
   }
@@ -529,11 +524,9 @@ void run_estimation(const SimulationData& sd) {
              "%.8f,%.8f,%.8f\n",
              ep.x(), ep.y(), ep.z(), ev.x(), ev.y(), ev.z(), ea.roll(),
              ea.pitch(), ea.yaw(), pe.x(), pe.y(), pe.z(), ve.x(), ve.y(),
-             ve.z(), ae.x(), ae.y(), ae.z(), abe.x(), abe.y(), abe.z(),
-             gbe.x(), gbe.y(), gbe.z(),
-             s3(0), s3(1), s3(2), s3(3), s3(4), s3(5),
-             s3(6), s3(7), s3(8), s3(9), s3(10), s3(11),
-             s3(12), s3(13), s3(14));
+             ve.z(), ae.x(), ae.y(), ae.z(), abe.x(), abe.y(), abe.z(), gbe.x(),
+             gbe.y(), gbe.z(), s3(0), s3(1), s3(2), s3(3), s3(4), s3(5), s3(6),
+             s3(7), s3(8), s3(9), s3(10), s3(11), s3(12), s3(13), s3(14));
     out << buf;
   }
 
@@ -562,9 +555,10 @@ int main(int /*argc*/, char* /*argv*/[]) {
 
   try {
     if constexpr (use_gauss_markov) {
-      printf("Using 1st-order Gauss-Markov bias model (tau_acc=%.0f s, "
-             "tau_gyro=%.0f s)\n",
-             tau_acc, tau_gyro);
+      printf(
+          "Using 1st-order Gauss-Markov bias model (tau_acc=%.0f s, "
+          "tau_gyro=%.0f s)\n",
+          tau_acc, tau_gyro);
       run_estimation<gtsam::imuBias::GaussMarkovBias>(*sd);
     } else {
       printf("Using constant (random walk) bias model\n");
