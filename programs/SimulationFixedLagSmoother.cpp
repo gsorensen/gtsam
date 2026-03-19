@@ -57,8 +57,12 @@ constexpr double tau_gyro = 3600.0;
 constexpr double smoother_lag = 10.0;
 
 /// Aiding scheme
-enum class Aiding { GNSS, PARSFull, GNSSAndPARS };
-constexpr Aiding aiding_scheme = Aiding::GNSSAndPARS;
+enum class Aiding { GNSS, PARSFull };
+constexpr Aiding aiding_scheme = Aiding::PARSFull;
+
+/// GNSS bootstrap duration [s] — when using PARS, GNSS is used for the first
+/// N seconds to initialise the filter before switching to PARS aiding.
+constexpr double gnss_bootstrap_duration = 10.0;
 
 /// Input/output paths
 const std::string input_file =
@@ -348,17 +352,19 @@ void run_estimation(const SimulationData& sd) {
       timestamps[V(correction_count)] = timestamp;
       timestamps[B(correction_count)] = timestamp;
 
+      // Determine active aiding: when using PARS, bootstrap with GNSS first
+      bool in_bootstrap = (timestamp < gnss_bootstrap_duration);
+      Aiding active_aiding =
+          (aiding_scheme == Aiding::PARSFull && in_bootstrap) ? Aiding::GNSS
+                                                              : aiding_scheme;
+
       // Add aiding factors
-      if (aiding_scheme == Aiding::GNSS ||
-          aiding_scheme == Aiding::GNSSAndPARS) {
+      if (active_aiding == Aiding::GNSS) {
         gtsam::Point3 gps_meas(gnss_pos(0, idx), gnss_pos(1, idx),
                                gnss_pos(2, idx));
         gtsam::GPSFactor gps_factor(X(correction_count), gps_meas, gnss_noise);
         graph.add(gps_factor);
-      }
-
-      if (aiding_scheme == Aiding::PARSFull ||
-          aiding_scheme == Aiding::GNSSAndPARS) {
+      } else if (active_aiding == Aiding::PARSFull) {
         for (const auto& beacon : beacons) {
           double azimuth = beacon.z(0, idx);
           double elevation = beacon.z(1, idx);
