@@ -1,6 +1,6 @@
-#include "PARSRangeFactor.hpp"
+#include "RangeFactor.hpp"
 
-namespace PARS {
+namespace parnav {
 
 template <typename Pose>
 auto RangeFactor<Pose>::h_c(const Pose& p) const -> double {
@@ -33,4 +33,4 @@ auto RangeFactor<Pose>::evaluateError(
 
 template class RangeFactor<gtsam::Pose3>;
 
-}  // namespace PARS
+}  // namespace parnav

@@ -9,7 +9,7 @@
 #include <gtsam/linear/NoiseModel.h>
 #include <gtsam/nonlinear/NonlinearFactor.h>
 
-namespace PARS {
+namespace parnav {
 
 using gtsam::symbol_shorthand::X;
 
@@ -41,4 +41,4 @@ class RangeFactor : public gtsam::NoiseModelFactor1<Pose> {
   gtsam::Matrix3 R_rn_;
 };
 
-}  // namespace PARS
+}  // namespace parnav

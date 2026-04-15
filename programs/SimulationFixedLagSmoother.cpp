@@ -33,10 +33,14 @@
 #include <type_traits>
 #include <vector>
 
-#include "PARSAzimuthFactor.hpp"
-#include "PARSElevationFactor.hpp"
-#include "PARSRangeFactor.hpp"
+#include "AzimuthFactor.hpp"
+#include "ElevationFactor.hpp"
+#include "RangeFactor.hpp"
 #include "utils.hpp"
+
+using parnav::deg2rad;
+using parnav::rad2deg;
+using parnav::ssa;
 
 using gtsam::symbol_shorthand::B;
 using gtsam::symbol_shorthand::V;
@@ -372,11 +376,11 @@ void run_estimation(const SimulationData& sd) {
           double elevation = beacon.z(1, idx);
           double azimuth = beacon.z(2, idx);
 
-          graph.add(PARS::RangeFactor<gtsam::Pose3>(
+          graph.add(parnav::RangeFactor<gtsam::Pose3>(
               X(correction_count), range_noise, range, beacon.origin));
-          graph.add(PARS::AzimuthFactor<gtsam::Pose3>(
+          graph.add(parnav::AzimuthFactor<gtsam::Pose3>(
               X(correction_count), azimuth_noise, azimuth, beacon.origin));
-          graph.add(PARS::ElevationFactor<gtsam::Pose3>(
+          graph.add(parnav::ElevationFactor<gtsam::Pose3>(
               X(correction_count), elevation_noise, elevation, beacon.origin));
         }
       }

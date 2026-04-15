@@ -1,8 +1,8 @@
-#include "PARSElevationFactor.hpp"
+#include "ElevationFactor.hpp"
 
 #include "utils.hpp"
 
-namespace PARS {
+namespace parnav {
 
 template <typename Pose>
 auto ElevationFactor<Pose>::evaluateError(
@@ -46,4 +46,4 @@ auto ElevationFactor<Pose>::H_c(const Pose& p) const -> gtsam::Matrix13 {
 
 template class ElevationFactor<gtsam::Pose3>;
 
-}  // namespace PARS
+}  // namespace parnav

@@ -9,22 +9,22 @@
 #include <gtsam/linear/NoiseModel.h>
 #include <gtsam/nonlinear/NonlinearFactor.h>
 
-namespace PARS {
+namespace parnav {
 
 using gtsam::symbol_shorthand::X;
 
 template <typename Pose>
-class AzimuthFactor : public gtsam::NoiseModelFactor1<Pose> {
+class ElevationFactor : public gtsam::NoiseModelFactor1<Pose> {
  private:
   using PosJacobian =
       Eigen::Matrix<double, 3, parnav::JacobianTraits<Pose>::Cols>;
 
  public:
-  AzimuthFactor(gtsam::Key j, const gtsam::SharedNoiseModel& model,
-                double azimuth, const gtsam::Point3& l,
-                const gtsam::Matrix3& R_r_n = gtsam::Matrix3::Identity())
+  ElevationFactor(gtsam::Key j, const gtsam::SharedNoiseModel& model,
+                  double elevation, const gtsam::Point3& l,
+                  const gtsam::Matrix3& R_r_n = gtsam::Matrix3::Identity())
       : gtsam::NoiseModelFactor1<Pose>{model, j},
-        m_z{azimuth},
+        m_z{elevation},
         m_l{l},
         R_rn_{R_r_n} {}
 
@@ -42,4 +42,4 @@ class AzimuthFactor : public gtsam::NoiseModelFactor1<Pose> {
   gtsam::Matrix3 R_rn_;
 };
 
-}  // namespace PARS
+}  // namespace parnav

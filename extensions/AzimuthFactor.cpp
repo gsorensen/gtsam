@@ -1,8 +1,8 @@
-#include "PARSAzimuthFactor.hpp"
+#include "AzimuthFactor.hpp"
 
 #include "utils.hpp"
 
-namespace PARS {
+namespace parnav {
 
 template <typename Pose>
 auto AzimuthFactor<Pose>::evaluateError(
@@ -42,4 +42,4 @@ auto AzimuthFactor<Pose>::H_c(const Pose& p) const -> gtsam::Matrix13 {
 
 template class AzimuthFactor<gtsam::Pose3>;
 
-}  // namespace PARS
+}  // namespace parnav
