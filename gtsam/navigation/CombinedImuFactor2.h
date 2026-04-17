@@ -1,0 +1,383 @@
+/* ----------------------------------------------------------------------------
+ * GTSAM Copyright 2010, Georgia Tech Research Corporation,
+ * Atlanta, Georgia 30332-0415
+ * All Rights Reserved
+ * See LICENSE for the license information
+ * -------------------------------------------------------------------------- */
+
+/**
+ * @file   CombinedImuFactor2.h
+ * @brief  SE_2(3) CombinedImuFactor2: 4-way factor on (state_i, state_j,
+ *         bias_i, bias_j) using ExtendedPose3 (Barrau ordering) and a
+ *         bias-templated SE_2(3) preintegrator.
+ *
+ * Covariance block layout in preintMeasCov_ (15 x 15):
+ *   [theta(3), nu(3), rho(3), bias_acc(3), bias_gyro(3)]
+ * note: (nu, rho) order, NOT the legacy (rho, nu).
+ */
+
+#pragma once
+
+#include <gtsam/navigation/ManifoldPreintegrationSE23.h>
+#include <gtsam/navigation/PreintegrationCombinedParams.h>
+#include <gtsam/nonlinear/NonlinearFactor.h>
+
+#include <ostream>
+
+namespace gtsam {
+
+/**
+ * SE_2(3) preintegration + 15x15 covariance tracking bias correlations.
+ *
+ * Inherits from `PIM`, which must be a subclass of
+ * `PreintegrationSE23Base<BiasType>` (default: `ManifoldPreintegrationSE23`).
+ */
+template <class PreintegrationType, class BiasType>
+class GTSAM_EXPORT PreintegratedCombinedMeasurements2T
+    : public PreintegrationType {
+ public:
+  typedef PreintegrationCombinedParamsT<BiasType> Params;
+
+ protected:
+  /// 15x15 covariance in [theta, nu, rho, bias_acc, bias_gyro] order.
+  Eigen::Matrix<double, 15, 15> preintMeasCov_;
+
+  template <class PIM, class BIAS>
+  friend class CombinedImuFactor2T;
+
+ public:
+  /// @name Constructors
+  /// @{
+
+  /// Default ctor (serialization / wrappers only).
+  PreintegratedCombinedMeasurements2T() { this->resetIntegration(); }
+
+  PreintegratedCombinedMeasurements2T(
+      const std::shared_ptr<Params>& p, const BiasType& biasHat = BiasType(),
+      const Eigen::Matrix<double, 15, 15>& preintMeasCov =
+          Eigen::Matrix<double, 15, 15>::Zero())
+      : PreintegrationType(p, biasHat), preintMeasCov_(preintMeasCov) {
+    this->PreintegrationType::resetIntegration();
+  }
+
+  PreintegratedCombinedMeasurements2T(
+      const PreintegrationType& base,
+      const Eigen::Matrix<double, 15, 15>& preintMeasCov)
+      : PreintegrationType(base), preintMeasCov_(preintMeasCov) {
+    this->PreintegrationType::resetIntegration();
+  }
+
+  ~PreintegratedCombinedMeasurements2T() override {}
+
+  /// @}
+  /// @name Basic utilities
+  /// @{
+
+  void resetIntegration() override {
+    PreintegrationType::resetIntegration();
+    preintMeasCov_.setZero();
+  }
+
+  /// const-reference to typed params; shadows the base class
+  Params& p() const { return *std::static_pointer_cast<Params>(this->p_); }
+
+  /// @}
+  /// @name Accessors
+  /// @{
+
+  /// Return preintegrated measurement covariance.
+  Matrix preintMeasCov() const { return preintMeasCov_; }
+
+  /// @}
+  /// @name Testable
+  /// @{
+
+  void print(const std::string& s =
+                 "Preintegrated SE_2(3) Measurements:") const override {
+    PreintegrationType::print(s);
+    std::cout << "  preintMeasCov [ " << preintMeasCov_ << " ]" << std::endl;
+  }
+
+  bool equals(
+      const PreintegratedCombinedMeasurements2T<PreintegrationType, BiasType>&
+          expected,
+      double tol = 1e-9) const {
+    return PreintegrationType::equals(expected, tol) &&
+           equal_with_abs_tol(preintMeasCov_, expected.preintMeasCov_, tol);
+  }
+
+  /// @}
+  /// @name Main functionality
+  /// @{
+
+  void integrateMeasurement(const Vector3& measuredAcc,
+                            const Vector3& measuredOmega,
+                            const double dt) override;
+
+  /// @}
+
+ private:
+#if GTSAM_ENABLE_BOOST_SERIALIZATION
+  friend class boost::serialization::access;
+  template <class ARCHIVE>
+  void serialize(ARCHIVE& ar, const unsigned int /*version*/) {
+    namespace bs = ::boost::serialization;
+    ar& BOOST_SERIALIZATION_BASE_OBJECT_NVP(PreintegrationType);
+    ar& BOOST_SERIALIZATION_NVP(preintMeasCov_);
+  }
+#endif
+
+ public:
+  GTSAM_MAKE_ALIGNED_OPERATOR_NEW
+};
+
+//==============================================================================
+// SE_2(3) covariance propagation
+//==============================================================================
+
+// sugar for 15x15 derivative blocks in the new (theta, nu, rho, ba, bg) layout.
+#define SE23_CIF_D_theta_theta(H) (H)->block<3, 3>(0, 0)
+#define SE23_CIF_D_nu_nu(H) (H)->block<3, 3>(3, 3)
+#define SE23_CIF_D_rho_rho(H) (H)->block<3, 3>(6, 6)
+#define SE23_CIF_D_nu_rho(H) (H)->block<3, 3>(3, 6)
+#define SE23_CIF_D_rho_nu(H) (H)->block<3, 3>(6, 3)
+#define SE23_CIF_D_ba_ba(H) (H)->block<3, 3>(9, 9)
+#define SE23_CIF_D_bg_bg(H) (H)->block<3, 3>(12, 12)
+
+template <class PreintegrationType, class BiasType>
+void PreintegratedCombinedMeasurements2T<PreintegrationType, BiasType>::
+    integrateMeasurement(const Vector3& measuredAcc,
+                         const Vector3& measuredOmega, double dt) {
+  if (dt <= 0) {
+    throw std::runtime_error(
+        "PreintegratedCombinedMeasurements2::integrateMeasurement: dt <= 0");
+  }
+
+  // 1. Underlying SE_2(3) state update + per-step Jacobians.
+  //    A : 9x9 tangent transition; B : 9x3 d(xi_inc)/d(acc); C : 9x3 d(xi_inc)/d(omega).
+  Matrix9 A;
+  Matrix93 B, C;
+  PreintegrationType::update(measuredAcc, measuredOmega, dt, &A, &B, &C);
+
+  // Row blocks for the SE_2(3) tangent: [0..2] theta, [3..5] nu, [6..8] rho.
+  const Matrix3 theta_H_omega = C.topRows<3>();
+  const Matrix3 nu_H_acc = B.middleRows<3>(3);
+  const Matrix3 rho_H_acc = B.bottomRows<3>();
+
+  // 2. Build 15x15 transition F in [theta, nu, rho, ba, bg] order.
+  Eigen::Matrix<double, 15, 15> F;
+  F.setZero();
+  F.block<9, 9>(0, 0) = A;
+
+  // Off-diagonal state/bias coupling. For ConstantBias, d(corrected)/d(bias) = -I,
+  // but F's off-diag gets the *positive* measurement Jacobian (sign cancels via F P F^T).
+  // For GaussMarkovBias, chain in the beta_* decay factors.
+  if constexpr (std::is_same_v<BiasType, imuBias::GaussMarkovBias>) {
+    const double t_k = this->deltaTij_ - dt;
+    const double beta_acc = std::exp(-t_k / this->biasHat_.tauAcc());
+    const double beta_omega = std::exp(-t_k / this->biasHat_.tauGyro());
+    F.block<3, 3>(0, 12) = beta_omega * theta_H_omega;
+    F.block<3, 3>(3, 9) = beta_acc * nu_H_acc;
+    F.block<3, 3>(6, 9) = beta_acc * rho_H_acc;
+  } else {
+    F.block<3, 3>(0, 12) = theta_H_omega;
+    F.block<3, 3>(3, 9) = nu_H_acc;
+    F.block<3, 3>(6, 9) = rho_H_acc;
+  }
+
+  // Bias block transition (identity for ConstantBias, exp(-dt/tau)*I for GM).
+  F.block<6, 6>(9, 9) = this->p().biasFTransition(dt, this->biasHat_);
+
+  preintMeasCov_ = F * preintMeasCov_ * F.transpose();
+
+  // 3. Process-noise injection.
+  const Matrix3& aCov = this->p().accelerometerCovariance;
+  const Matrix3& wCov = this->p().gyroscopeCovariance;
+  const Matrix3& iCov = this->p().integrationCovariance;
+
+  Eigen::Matrix<double, 15, 15> G_measCov_Gt;
+  G_measCov_Gt.setZero();
+
+  // Diagonal blocks.
+  SE23_CIF_D_theta_theta(&G_measCov_Gt) =
+      theta_H_omega * (wCov / dt) * theta_H_omega.transpose();
+  SE23_CIF_D_nu_nu(&G_measCov_Gt) =
+      nu_H_acc * (aCov / dt) * nu_H_acc.transpose();
+  // rho accumulates both the acc-induced term and the integration covariance.
+  SE23_CIF_D_rho_rho(&G_measCov_Gt) =
+      rho_H_acc * (aCov / dt) * rho_H_acc.transpose() + dt * iCov;
+
+  // nu <-> rho correlation (both driven by the same acc noise realisation).
+  SE23_CIF_D_nu_rho(&G_measCov_Gt) =
+      nu_H_acc * (aCov / dt) * rho_H_acc.transpose();
+  SE23_CIF_D_rho_nu(&G_measCov_Gt) =
+      rho_H_acc * (aCov / dt) * nu_H_acc.transpose();
+
+  // Bias process noise.
+  SE23_CIF_D_ba_ba(&G_measCov_Gt) =
+      this->p().discreteBiasAccCovariance(dt, this->biasHat_);
+  SE23_CIF_D_bg_bg(&G_measCov_Gt) =
+      this->p().discreteBiasOmegaCovariance(dt, this->biasHat_);
+
+  preintMeasCov_.noalias() += G_measCov_Gt;
+}
+
+#undef SE23_CIF_D_theta_theta
+#undef SE23_CIF_D_nu_nu
+#undef SE23_CIF_D_rho_rho
+#undef SE23_CIF_D_nu_rho
+#undef SE23_CIF_D_rho_nu
+#undef SE23_CIF_D_ba_ba
+#undef SE23_CIF_D_bg_bg
+
+//==============================================================================
+// CombinedImuFactor2T: 4-way factor on (state_i, state_j, bias_i, bias_j).
+//==============================================================================
+
+/**
+ * 4-way combined IMU factor on ExtendedPose3 (SE_2(3)) states plus biases.
+ * Uses the bias-templated SE_2(3) preintegrator, so it supports both
+ * `ConstantBias` (Wiener) and `GaussMarkovBias` models.
+ *
+ * Residual layout (15 x 1): [r_SE23 (9), r_bias (6)].
+ * Bias residual: r_bias = F_total * bias_i - bias_j, where
+ *   F_total = I_6x6                       (ConstantBias)
+ *   F_total = diag(exp(-T/tauAcc)*I3, exp(-T/tauGyro)*I3)  (GaussMarkovBias)
+ */
+template <class PIM = PreintegratedCombinedMeasurements2T<
+                         ManifoldPreintegrationSE23<imuBias::ConstantBias>,
+                         imuBias::ConstantBias>,
+          class BIAS = imuBias::ConstantBias>
+class GTSAM_EXPORT CombinedImuFactor2T
+    : public NoiseModelFactorN<ExtendedPose3, ExtendedPose3, BIAS, BIAS> {
+ private:
+  typedef CombinedImuFactor2T<PIM, BIAS> This;
+  typedef NoiseModelFactorN<ExtendedPose3, ExtendedPose3, BIAS, BIAS> Base;
+
+  PIM pim_;
+
+ public:
+  using Base::evaluateError;
+
+  typedef std::shared_ptr<This> shared_ptr;
+
+  CombinedImuFactor2T() {}
+
+  CombinedImuFactor2T(Key state_i, Key state_j, Key bias_i, Key bias_j,
+                      const PIM& preintegratedMeasurements)
+      : Base(noiseModel::Gaussian::Covariance(
+                 preintegratedMeasurements.preintMeasCov()),
+             state_i, state_j, bias_i, bias_j),
+        pim_(preintegratedMeasurements) {}
+
+  ~CombinedImuFactor2T() override {}
+
+  gtsam::NonlinearFactor::shared_ptr clone() const override {
+    return std::make_shared<This>(*this);
+  }
+
+  /// @name Testable
+  /// @{
+  void print(const std::string& s = "", const KeyFormatter& keyFormatter =
+                                            DefaultKeyFormatter) const override {
+    std::cout << (s.empty() ? s : s + "\n") << "CombinedImuFactor2("
+              << keyFormatter(this->template key<1>()) << ","
+              << keyFormatter(this->template key<2>()) << ","
+              << keyFormatter(this->template key<3>()) << ","
+              << keyFormatter(this->template key<4>()) << ")\n";
+    pim_.print("  preintegrated measurements:");
+    this->noiseModel_->print("  noise model: ");
+  }
+
+  bool equals(const NonlinearFactor& other, double tol = 1e-9) const override {
+    const This* e = dynamic_cast<const This*>(&other);
+    return e != nullptr && Base::equals(*e, tol) && pim_.equals(e->pim_, tol);
+  }
+  /// @}
+
+  const PIM& preintegratedMeasurements() const { return pim_; }
+
+  Vector evaluateError(const ExtendedPose3& state_i,
+                       const ExtendedPose3& state_j, const BIAS& bias_i,
+                       const BIAS& bias_j, OptionalMatrixType H1,
+                       OptionalMatrixType H2, OptionalMatrixType H3,
+                       OptionalMatrixType H4) const override {
+    // Bias transition over the full preintegration interval.
+    //   ConstantBias:    F_total = I_6x6
+    //   GaussMarkovBias: F_total = diag(exp(-T/tauAcc)*I3, exp(-T/tauGyro)*I3)
+    const Matrix6 F_total =
+        pim_.p().biasFTransition(pim_.deltaTij(), pim_.biasHat());
+
+    // Bias residual: predicted bias_j (= F_total * bias_i) minus actual.
+    const Vector6 fbias = F_total * bias_i.vector() - bias_j.vector();
+
+    Matrix9 D_r_state_i, D_r_state_j;
+    Matrix96 D_r_bias_i;
+    const Vector9 r_SE23 = pim_.computeError(
+        state_i, state_j, bias_i, H1 ? &D_r_state_i : nullptr,
+        H2 ? &D_r_state_j : nullptr, H3 ? &D_r_bias_i : nullptr);
+
+    if (H1) {
+      H1->resize(15, 9);
+      H1->block<9, 9>(0, 0) = D_r_state_i;
+      H1->block<6, 9>(9, 0).setZero();
+    }
+    if (H2) {
+      H2->resize(15, 9);
+      H2->block<9, 9>(0, 0) = D_r_state_j;
+      H2->block<6, 9>(9, 0).setZero();
+    }
+    if (H3) {
+      H3->resize(15, 6);
+      H3->block<9, 6>(0, 0) = D_r_bias_i;
+      H3->block<6, 6>(9, 0) = F_total;
+    }
+    if (H4) {
+      H4->resize(15, 6);
+      H4->block<9, 6>(0, 0).setZero();
+      H4->block<6, 6>(9, 0) = -I_6x6;
+    }
+
+    Vector r(15);
+    r << r_SE23, fbias;
+    return r;
+  }
+
+ private:
+#if GTSAM_ENABLE_BOOST_SERIALIZATION
+  friend class boost::serialization::access;
+  template <class ARCHIVE>
+  void serialize(ARCHIVE& ar, const unsigned int /*version*/) {
+    ar& boost::serialization::make_nvp(
+        "NoiseModelFactor4", boost::serialization::base_object<Base>(*this));
+    ar& BOOST_SERIALIZATION_NVP(pim_);
+  }
+#endif
+
+ public:
+  GTSAM_MAKE_ALIGNED_OPERATOR_NEW
+};
+
+/// Default alias — SE_2(3) + ConstantBias, replacing the legacy
+/// NavState-based CombinedImuFactor2.
+using CombinedImuFactor2 = CombinedImuFactor2T<>;
+
+template <class PIM, class BIAS>
+std::ostream& operator<<(std::ostream& os,
+                         const CombinedImuFactor2T<PIM, BIAS>& f) {
+  f.preintegratedMeasurements().print("combined preintegrated measurements:\n");
+  os << "  noise model sigmas: " << f.noiseModel()->sigmas().transpose();
+  return os;
+}
+
+// Traits for downstream Testable interfaces.
+template <class PreintegrationType, class BiasType>
+struct traits<PreintegratedCombinedMeasurements2T<PreintegrationType, BiasType>>
+    : public Testable<PreintegratedCombinedMeasurements2T<PreintegrationType,
+                                                          BiasType>> {};
+
+template <class PIM, class BIAS>
+struct traits<CombinedImuFactor2T<PIM, BIAS>>
+    : public Testable<CombinedImuFactor2T<PIM, BIAS>> {};
+
+}  // namespace gtsam

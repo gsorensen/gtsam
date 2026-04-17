@@ -99,9 +99,6 @@ class GTSAM_EXPORT PreintegratedCombinedMeasurementsT
   template <class PIM, class BIAS>
   friend class CombinedImuFactorT;
 
-  template <class PIM>
-  friend class CombinedImuFactor2T;
-
  public:
   /// @name Constructors
   /// @{
@@ -350,74 +347,9 @@ template <class PIM>
 struct traits<CombinedImuFactorT<PIM>>
     : public Testable<CombinedImuFactorT<PIM>> {};
 
-template <class PIM = PreintegratedCombinedMeasurements>
-class GTSAM_EXPORT CombinedImuFactor2T
-    : public NoiseModelFactorN<NavState, NavState, imuBias::ConstantBias,
-                               imuBias::ConstantBias> {
- private:
-  typedef CombinedImuFactor2T<PIM> This;
-  typedef NoiseModelFactorN<NavState, NavState, imuBias::ConstantBias,
-                            imuBias::ConstantBias>
-      Base;
-
-  PIM pim_;
-
- public:
-  using Base::evaluateError;
-
-  typedef std::shared_ptr<This> shared_ptr;
-
-  CombinedImuFactor2T() {}
-
-  CombinedImuFactor2T(Key state_i, Key state_j, Key bias_i, Key bias_j,
-                      const PIM& preintegratedMeasurements)
-      : Base(noiseModel::Gaussian::Covariance(
-                 preintegratedMeasurements.preintMeasCov()),
-             state_i, state_j, bias_i, bias_j),
-        pim_(preintegratedMeasurements) {}
-  ~CombinedImuFactor2T() override {}
-
-  gtsam::NonlinearFactor::shared_ptr clone() const override {
-    return std::make_shared<This>(*this);
-  }
-
-  void print(const std::string& s = "", const KeyFormatter& keyFormatter =
-                                            DefaultKeyFormatter) const override;
-  bool equals(const NonlinearFactor& expected,
-              double tol = 1e-9) const override;
-
-  const PIM& preintegratedMeasurements() const { return pim_; }
-
-  Vector evaluateError(const NavState& state_i, const NavState& state_j,
-                       const imuBias::ConstantBias& bias_i,
-                       const imuBias::ConstantBias& bias_j,
-                       OptionalMatrixType H1, OptionalMatrixType H2,
-                       OptionalMatrixType H3,
-                       OptionalMatrixType H4) const override;
-
- private:
-#if GTSAM_ENABLE_BOOST_SERIALIZATION
-  /** Serialization function */
-  friend class boost::serialization::access;
-  template <class ARCHIVE>
-  void serialize(ARCHIVE& ar, const unsigned int /*version*/) {
-    // NoiseModelFactor4 instead of NoiseModelFactorN for backward compatibility
-    ar& boost::serialization::make_nvp(
-        "NoiseModelFactor4", boost::serialization::base_object<Base>(*this));
-    ar& BOOST_SERIALIZATION_NVP(pim_);
-  }
-#endif
-};
-
-using CombinedImuFactor2 = CombinedImuFactor2T<>;
-
-template <class PIM>
-GTSAM_EXPORT std::ostream& operator<<(std::ostream& os,
-                                      const CombinedImuFactor2T<PIM>& f);
-
-template <class PIM>
-struct traits<CombinedImuFactor2T<PIM>>
-    : public Testable<CombinedImuFactor2T<PIM>> {};
+// NOTE: The legacy NavState-based CombinedImuFactor2T has been removed.
+// The replacement — an SE_2(3) / ExtendedPose3 / bias-templated factor —
+// lives in <gtsam/navigation/CombinedImuFactor2.h>.
 
 //==============================================================================
 // Template method implementations
@@ -642,80 +574,6 @@ Vector CombinedImuFactorT<PIM, BIAS>::evaluateError(
 template <class PIM, class BIAS>
 std::ostream& operator<<(std::ostream& os,
                          const CombinedImuFactorT<PIM, BIAS>& f) {
-  f.preintegratedMeasurements().print("combined preintegrated measurements:\n");
-  os << "  noise model sigmas: " << f.noiseModel()->sigmas().transpose();
-  return os;
-}
-
-//------------------------------------------------------------------------------
-// CombinedImuFactor2T implementations
-//------------------------------------------------------------------------------
-
-template <class PIM>
-void CombinedImuFactor2T<PIM>::print(const std::string& s,
-                                     const KeyFormatter& keyFormatter) const {
-  std::cout << (s.empty() ? s : s + "\n") << "CombinedImuFactor2("
-            << keyFormatter(this->template key<1>()) << ","
-            << keyFormatter(this->template key<2>()) << ","
-            << keyFormatter(this->template key<3>()) << ","
-            << keyFormatter(this->template key<4>()) << ")\n";
-  pim_.print("  preintegrated measurements:");
-  this->noiseModel_->print("  noise model: ");
-}
-
-template <class PIM>
-bool CombinedImuFactor2T<PIM>::equals(const NonlinearFactor& other,
-                                      double tol) const {
-  const This* e = dynamic_cast<const This*>(&other);
-  return e != nullptr && Base::equals(*e, tol) && pim_.equals(e->pim_, tol);
-}
-
-template <class PIM>
-Vector CombinedImuFactor2T<PIM>::evaluateError(
-    const NavState& state_i, const NavState& state_j,
-    const imuBias::ConstantBias& bias_i, const imuBias::ConstantBias& bias_j,
-    OptionalMatrixType H1, OptionalMatrixType H2, OptionalMatrixType H3,
-    OptionalMatrixType H4) const {
-  Matrix6 Hbias_i, Hbias_j;
-  Vector6 fbias = traits<imuBias::ConstantBias>::Between(
-                      bias_j, bias_i, H4 ? &Hbias_j : 0, H3 ? &Hbias_i : 0)
-                      .vector();
-
-  Matrix9 D_r_state_i, D_r_state_j;
-  Matrix96 D_r_bias_i;
-
-  Vector9 r_Rpv =
-      pim_.computeError(state_i, state_j, bias_i, H1 ? &D_r_state_i : 0,
-                        H2 ? &D_r_state_j : 0, H3 ? &D_r_bias_i : 0);
-
-  if (H1) {
-    H1->resize(15, 9);
-    H1->block<9, 9>(0, 0) = D_r_state_i;
-    H1->block<6, 9>(9, 0).setZero();
-  }
-  if (H2) {
-    H2->resize(15, 9);
-    H2->block<9, 9>(0, 0) = D_r_state_j;
-    H2->block<6, 9>(9, 0).setZero();
-  }
-  if (H3) {
-    H3->resize(15, 6);
-    H3->block<9, 6>(0, 0) = D_r_bias_i;
-    H3->block<6, 6>(9, 0) = Hbias_i;
-  }
-  if (H4) {
-    H4->resize(15, 6);
-    H4->block<9, 6>(0, 0).setZero();
-    H4->block<6, 6>(9, 0) = Hbias_j;
-  }
-
-  Vector r(15);
-  r << r_Rpv, fbias;
-  return r;
-}
-
-template <class PIM>
-std::ostream& operator<<(std::ostream& os, const CombinedImuFactor2T<PIM>& f) {
   f.preintegratedMeasurements().print("combined preintegrated measurements:\n");
   os << "  noise model sigmas: " << f.noiseModel()->sigmas().transpose();
   return os;
