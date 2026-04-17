@@ -39,7 +39,6 @@ CombinedParamsCB() {
   p->integrationCovariance = 1e-6 * I_3x3;
   p->biasAccCovariance = 1e-6 * I_3x3;
   p->biasOmegaCovariance = 1e-7 * I_3x3;
-  p->biasAccOmegaInt = Matrix6::Identity() * 1e-5;
   return p;
 }
 
@@ -50,7 +49,6 @@ std::shared_ptr<PreintegrationCombinedParamsT<GMBias>> CombinedParamsGM() {
   p->integrationCovariance = 1e-6 * I_3x3;
   p->biasAccCovariance = 1e-6 * I_3x3;
   p->biasOmegaCovariance = 1e-7 * I_3x3;
-  p->biasAccOmegaInt = Matrix6::Identity() * 1e-5;
   return p;
 }
 
