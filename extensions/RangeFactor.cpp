@@ -32,5 +32,6 @@ auto RangeFactor<Pose>::evaluateError(
 }
 
 template class RangeFactor<gtsam::Pose3>;
+template class RangeFactor<gtsam::ExtendedPose3>;
 
 }  // namespace parnav

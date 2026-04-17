@@ -41,5 +41,6 @@ auto AzimuthFactor<Pose>::H_c(const Pose& p) const -> gtsam::Matrix13 {
 }
 
 template class AzimuthFactor<gtsam::Pose3>;
+template class AzimuthFactor<gtsam::ExtendedPose3>;
 
 }  // namespace parnav

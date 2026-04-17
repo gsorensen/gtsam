@@ -45,5 +45,6 @@ auto ElevationFactor<Pose>::H_c(const Pose& p) const -> gtsam::Matrix13 {
 }
 
 template class ElevationFactor<gtsam::Pose3>;
+template class ElevationFactor<gtsam::ExtendedPose3>;
 
 }  // namespace parnav

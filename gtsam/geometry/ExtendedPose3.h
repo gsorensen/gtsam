@@ -93,6 +93,10 @@ class GTSAM_EXPORT ExtendedPose3 : public MatrixLieGroup<ExtendedPose3, 9, 5> {
 
   const Rot3& rotation() const { return R_; }
 
+  /// Alias for position(), matching Pose3's accessor name so that generic
+  /// factor code templated on Pose works with ExtendedPose3.
+  const Point3& translation() const { return p_; }
+
   Pose3 pose() const { return Pose3(R_, p_); }
 
   /// @}
