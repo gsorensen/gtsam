@@ -34,8 +34,8 @@
 #include <gtsam/nonlinear/IncrementalFixedLagSmoother.h>
 #include <gtsam/nonlinear/NonlinearFactor.h>
 #include <gtsam/nonlinear/NonlinearFactorGraph.h>
-#include <gtsam/slam/BetweenFactor.h>
 #include <gtsam/nonlinear/Values.h>
+#include <gtsam/slam/BetweenFactor.h>
 
 #include <Eigen/Core>
 #include <chrono>
@@ -81,7 +81,8 @@ struct Options {
   double robust_threshold = 0.0;  // auto-filled from scheme default if 0
 
   std::string input_file =
-      "/Users/ghms/ws/ntnu/parnav/parnav-scripts/post_processing/df_flat_data.csv";
+      "/Users/ghms/ws/ntnu/parnav/parnav-scripts/post_processing/"
+      "df_flat_data.csv";
   std::string output_dir =
       "/Users/ghms/ws/ntnu/parnav/parnav-scripts/post_processing/";
   std::string output_prefix = "ifac_wc_2026_";
@@ -94,9 +95,11 @@ void print_usage(const char* prog) {
       << "  --preint {se3|se23}         state parameterisation (default: se3)\n"
       << "  --bias {cb|gm}              bias model (default: cb)\n"
       << "  --handover {none|angle|angle-baro|angle-range}\n"
-      << "                               aiding handover policy (default: none)\n"
+      << "                               aiding handover policy (default: "
+         "none)\n"
       << "  --robust {none|gm|tukey}    robust kernel on PARS factors\n"
-      << "  --robust-threshold <v>      kernel threshold (default 1.0 for gm, 4.6851 for tukey)\n"
+      << "  --robust-threshold <v>      kernel threshold (default 1.0 for gm, "
+         "4.6851 for tukey)\n"
       << "  --input <path>\n"
       << "  --output-dir <path>\n"
       << "  --output-prefix <str>\n"
@@ -119,30 +122,53 @@ bool parse_args(int argc, char** argv, Options& o) {
     } else if (a == "--preint") {
       if (!need(i, "--preint")) return false;
       std::string v = argv[++i];
-      if (v == "se3") o.use_se23 = false;
-      else if (v == "se23") o.use_se23 = true;
-      else { std::cerr << "Unknown --preint " << v << "\n"; return false; }
+      if (v == "se3")
+        o.use_se23 = false;
+      else if (v == "se23")
+        o.use_se23 = true;
+      else {
+        std::cerr << "Unknown --preint " << v << "\n";
+        return false;
+      }
     } else if (a == "--bias") {
       if (!need(i, "--bias")) return false;
       std::string v = argv[++i];
-      if (v == "cb") o.use_gauss_markov = false;
-      else if (v == "gm") o.use_gauss_markov = true;
-      else { std::cerr << "Unknown --bias " << v << "\n"; return false; }
+      if (v == "cb")
+        o.use_gauss_markov = false;
+      else if (v == "gm")
+        o.use_gauss_markov = true;
+      else {
+        std::cerr << "Unknown --bias " << v << "\n";
+        return false;
+      }
     } else if (a == "--handover") {
       if (!need(i, "--handover")) return false;
       std::string v = argv[++i];
-      if (v == "none") o.handover = Handover::None;
-      else if (v == "angle") o.handover = Handover::Angle;
-      else if (v == "angle-baro") o.handover = Handover::AngleBaro;
-      else if (v == "angle-range") o.handover = Handover::AngleRange;
-      else { std::cerr << "Unknown --handover " << v << "\n"; return false; }
+      if (v == "none")
+        o.handover = Handover::None;
+      else if (v == "angle")
+        o.handover = Handover::Angle;
+      else if (v == "angle-baro")
+        o.handover = Handover::AngleBaro;
+      else if (v == "angle-range")
+        o.handover = Handover::AngleRange;
+      else {
+        std::cerr << "Unknown --handover " << v << "\n";
+        return false;
+      }
     } else if (a == "--robust") {
       if (!need(i, "--robust")) return false;
       std::string v = argv[++i];
-      if (v == "none") o.robust = Robust::None;
-      else if (v == "gm") o.robust = Robust::GemanMcClure;
-      else if (v == "tukey") o.robust = Robust::Tukey;
-      else { std::cerr << "Unknown --robust " << v << "\n"; return false; }
+      if (v == "none")
+        o.robust = Robust::None;
+      else if (v == "gm")
+        o.robust = Robust::GemanMcClure;
+      else if (v == "tukey")
+        o.robust = Robust::Tukey;
+      else {
+        std::cerr << "Unknown --robust " << v << "\n";
+        return false;
+      }
     } else if (a == "--robust-threshold") {
       if (!need(i, "--robust-threshold")) return false;
       o.robust_threshold = std::stod(argv[++i]);
@@ -178,7 +204,7 @@ struct MultirotorData {
   std::vector<double> t;
   std::vector<Eigen::Vector3d> f_m;
   std::vector<Eigen::Vector3d> w_m;
-  std::vector<Eigen::Vector3d> z_bt;       // [azi, ele, range]
+  std::vector<Eigen::Vector3d> z_bt;  // [azi, ele, range]
   std::vector<Eigen::Vector3d> z_bt_ned;
   std::vector<int> bt_meas_idx;
   std::vector<Eigen::Vector3d> z_gnss_ned;
@@ -191,7 +217,8 @@ struct MultirotorData {
   std::vector<double> z_gnss_range;
 };
 
-std::optional<MultirotorData> parse_multirotor_csv(const std::string& filename) {
+std::optional<MultirotorData> parse_multirotor_csv(
+    const std::string& filename) {
   std::ifstream file(filename);
   if (!file) {
     std::cerr << "Error: Could not open " << filename << "\n";
@@ -211,16 +238,28 @@ std::optional<MultirotorData> parse_multirotor_csv(const std::string& filename) 
     }
     size_t i = 0;
     d.t.push_back(std::stod(tok[i++]));
-    d.f_m.emplace_back(std::stod(tok[i]), std::stod(tok[i + 1]), std::stod(tok[i + 2])); i += 3;
-    d.w_m.emplace_back(std::stod(tok[i]), std::stod(tok[i + 1]), std::stod(tok[i + 2])); i += 3;
-    d.z_bt.emplace_back(std::stod(tok[i]), std::stod(tok[i + 1]), std::stod(tok[i + 2])); i += 3;
-    d.z_bt_ned.emplace_back(std::stod(tok[i]), std::stod(tok[i + 1]), std::stod(tok[i + 2])); i += 3;
+    d.f_m.emplace_back(std::stod(tok[i]), std::stod(tok[i + 1]),
+                       std::stod(tok[i + 2]));
+    i += 3;
+    d.w_m.emplace_back(std::stod(tok[i]), std::stod(tok[i + 1]),
+                       std::stod(tok[i + 2]));
+    i += 3;
+    d.z_bt.emplace_back(std::stod(tok[i]), std::stod(tok[i + 1]),
+                        std::stod(tok[i + 2]));
+    i += 3;
+    d.z_bt_ned.emplace_back(std::stod(tok[i]), std::stod(tok[i + 1]),
+                            std::stod(tok[i + 2]));
+    i += 3;
     d.bt_meas_idx.push_back(std::stoi(tok[i++]));
-    d.z_gnss_ned.emplace_back(std::stod(tok[i]), std::stod(tok[i + 1]), std::stod(tok[i + 2])); i += 3;
+    d.z_gnss_ned.emplace_back(std::stod(tok[i]), std::stod(tok[i + 1]),
+                              std::stod(tok[i + 2]));
+    i += 3;
     d.gnss_meas_idx.push_back(std::stoi(tok[i++]));
     d.yaw.push_back(std::stod(tok[i++]));
     d.yaw_idx.push_back(std::stoi(tok[i++]));
-    d.z_gnss_comp.emplace_back(std::stod(tok[i]), std::stod(tok[i + 1]), std::stod(tok[i + 2])); i += 3;
+    d.z_gnss_comp.emplace_back(std::stod(tok[i]), std::stod(tok[i + 1]),
+                               std::stod(tok[i + 2]));
+    i += 3;
     d.z_baro.push_back(std::stod(tok[i++]));
     d.baro_idx.push_back(std::stoi(tok[i++]));
     d.z_gnss_range.push_back(std::stod(tok[i++]));
@@ -256,10 +295,14 @@ struct HandoverCfg {
 
 HandoverCfg handover_cfg(Handover h) {
   switch (h) {
-    case Handover::None:       return {1e9,   false};
-    case Handover::Angle:      return {450.0, false};
-    case Handover::AngleBaro:  return {200.0, true};
-    case Handover::AngleRange: return {200.0, false};
+    case Handover::None:
+      return {1e9, false};
+    case Handover::Angle:
+      return {450.0, false};
+    case Handover::AngleBaro:
+      return {200.0, true};
+    case Handover::AngleRange:
+      return {200.0, false};
   }
   return {1e9, false};
 }
@@ -306,16 +349,18 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
   const double bias_instability_ars = 0.5;   // deg/hour
   const double T_acc = 3600.0;
   const double T_ars = 3600.0;
-  const double noise_scaling = 1.2;
+  const double noise_scaling = 10;
   const double bias_scaling = 50.0;
 
   const double q_v = std::pow(noise_scaling * vrw / 60.0, 2.0);
   const double q_o = std::pow((bias_scaling * arw / 60.0) * deg2rad(1.0), 2.0);
   const double q_b_v =
-      (2.0 / T_acc) * std::pow(bias_scaling * bias_instability_acc * (g0 / 1000.0), 2.0);
+      (2.0 / T_acc) *
+      std::pow(bias_scaling * bias_instability_acc * (g0 / 1000.0), 2.0);
   const double q_b_o =
       (2.0 / T_ars) *
-      std::pow((bias_scaling * bias_instability_ars / 3600.0) * deg2rad(1.0), 2.0);
+      std::pow((bias_scaling * bias_instability_ars / 3600.0) * deg2rad(1.0),
+               2.0);
   const double q_p = 1e-40;
 
   // --- Preintegration params ---
@@ -345,22 +390,21 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
   auto baro_noise = gtsam::noiseModel::Isotropic::Sigma(1, 1.0);
 
   // PARS noise models (1-d each; robust kernel applied if requested)
-  auto pars_azi_base =
-      gtsam::noiseModel::Isotropic::Sigma(1, deg2rad(5.0));
-  auto pars_ele_base =
-      gtsam::noiseModel::Isotropic::Sigma(1, deg2rad(5.0));
+  auto pars_azi_base = gtsam::noiseModel::Isotropic::Sigma(1, deg2rad(5.0));
+  auto pars_ele_base = gtsam::noiseModel::Isotropic::Sigma(1, deg2rad(5.0));
   auto pars_range_base = gtsam::noiseModel::Isotropic::Sigma(1, 1.5);
-  auto pars_azi_noise = wrap_robust(pars_azi_base, opts.robust, opts.robust_threshold);
-  auto pars_ele_noise = wrap_robust(pars_ele_base, opts.robust, opts.robust_threshold);
+  auto pars_azi_noise =
+      wrap_robust(pars_azi_base, opts.robust, opts.robust_threshold);
+  auto pars_ele_noise =
+      wrap_robust(pars_ele_base, opts.robust, opts.robust_threshold);
   auto pars_range_noise =
       wrap_robust(pars_range_base, opts.robust, opts.robust_threshold);
 
   // --- PARS geometry (fixed constants from original program) ---
   Eigen::Matrix3d R_rn;
-  R_rn << 0.0297, -0.0824, -0.9962,
-         -0.0379, -0.9960,  0.0813,
-         -0.9988,  0.0353, -0.0327;
-  Eigen::Vector3d pars_origin(0.0601, 0.1740, 0.0436);
+  R_rn << -0.0369, 0.1402, -0.9894, -0.0456, -0.9893, -0.1384, -0.9983, 0.0401,
+      0.0429;
+  Eigen::Vector3d pars_origin(-0.0519, -0.0820, 0.0492);
 
   // --- Compass / baseline geometry ---
   const gtsam::Point3 p_imu_rover_b(0.153, -0.019, -0.302);
@@ -368,7 +412,8 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
   const gtsam::Point3 baseline_body = p_imu_rover_b - p_imu_bm_b;
 
   // --- Initial state (from original program) ---
-  gtsam::Rot3 R0 = gtsam::Rot3::Quaternion(0.017, 0.0085, -0.0007, 0.9998).normalized();
+  gtsam::Rot3 R0 =
+      gtsam::Rot3::Quaternion(0.017, 0.0085, -0.0007, 0.9998).normalized();
   gtsam::Point3 p0 = gtsam::Point3::Zero();
   gtsam::Vector3 v0 = gtsam::Vector3::Zero();
 
@@ -386,8 +431,9 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
   }
 
   auto bias_noise = gtsam::noiseModel::Diagonal::Sigmas(
-      (gtsam::Vector(6) << A_acc_bias, A_acc_bias, A_acc_bias,
-       A_gyro_bias, A_gyro_bias, A_gyro_bias).finished());
+      (gtsam::Vector(6) << A_acc_bias, A_acc_bias, A_acc_bias, A_gyro_bias,
+       A_gyro_bias, A_gyro_bias)
+          .finished());
   auto baro_bias_noise = gtsam::noiseModel::Isotropic::Sigma(1, A_baro_bias);
 
   // --- Smoother setup ---
@@ -404,15 +450,17 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
 
   if constexpr (UseSE23) {
     auto ep_noise = gtsam::noiseModel::Diagonal::Sigmas(
-        (gtsam::Vector(9) << A_att, A_att, A_att, A_vel, A_vel, A_vel,
-         A_pos, A_pos, A_pos).finished());
+        (gtsam::Vector(9) << A_att, A_att, A_att, A_vel, A_vel, A_vel, A_pos,
+         A_pos, A_pos)
+            .finished());
     gtsam::ExtendedPose3 ext0(R0, v0, p0);
     graph.addPrior<gtsam::ExtendedPose3>(X(0), ext0, ep_noise);
     values.insert(X(0), ext0);
     timestamps[X(0)] = 0.0;
   } else {
     auto pose_noise = gtsam::noiseModel::Diagonal::Sigmas(
-        (gtsam::Vector(6) << A_att, A_att, A_att, A_pos, A_pos, A_pos).finished());
+        (gtsam::Vector(6) << A_att, A_att, A_att, A_pos, A_pos, A_pos)
+            .finished());
     auto vel_noise = gtsam::noiseModel::Isotropic::Sigma(3, A_vel);
     graph.addPrior<gtsam::Pose3>(X(0), gtsam::Pose3(R0, p0), pose_noise);
     graph.addPrior<gtsam::Vector3>(V(0), v0, vel_noise);
@@ -437,8 +485,10 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
   using StateType =
       std::conditional_t<UseSE23, gtsam::ExtendedPose3, gtsam::NavState>;
   StateType prev_state = [&] {
-    if constexpr (UseSE23) return gtsam::ExtendedPose3(R0, v0, p0);
-    else return gtsam::NavState(gtsam::Pose3(R0, p0), v0);
+    if constexpr (UseSE23)
+      return gtsam::ExtendedPose3(R0, v0, p0);
+    else
+      return gtsam::NavState(gtsam::Pose3(R0, p0), v0);
   }();
   BIAS prev_bias = prior_bias;
   double prev_baro_bias = 0.0;
@@ -496,8 +546,7 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
 
     // --- Predict and insert initial values ---
     if constexpr (UseSE23) {
-      gtsam::ExtendedPose3 prop =
-          preintegrated->predict(prev_state, prev_bias);
+      gtsam::ExtendedPose3 prop = preintegrated->predict(prev_state, prev_bias);
       values.insert(X(correction_count), prop);
       values.insert(B(correction_count), prev_bias);
       timestamps[X(correction_count)] = t_now;
@@ -515,9 +564,8 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
     // --- Baro bias random walk + state ---
     if (use_baro) {
       auto rw_noise = gtsam::noiseModel::Isotropic::Sigma(1, 1e-3);
-      graph.add(gtsam::BetweenFactor<double>(D(correction_count - 1),
-                                             D(correction_count), 0.0,
-                                             rw_noise));
+      graph.add(gtsam::BetweenFactor<double>(
+          D(correction_count - 1), D(correction_count), 0.0, rw_noise));
       values.insert(D(correction_count), prev_baro_bias);
       timestamps[D(correction_count)] = t_now;
     }
@@ -537,9 +585,9 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
             compass_baseline_noise));
       }
       if (baro_tick) {
-        graph.add(parnav::BaroFactor<PoseParam>(
-            X(correction_count), D(correction_count), d.z_baro[idx],
-            baro_noise));
+        graph.add(parnav::BaroFactor<PoseParam>(X(correction_count),
+                                                D(correction_count),
+                                                d.z_baro[idx], baro_noise));
       }
     } else if (post_tick) {
       if (d.bt_meas_idx[idx] != 0) {
@@ -551,15 +599,15 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
         graph.add(parnav::ElevationFactor<PoseParam>(
             X(correction_count), pars_ele_noise, ele, -pars_origin, R_rn));
         if (!use_baro) {
-          graph.add(parnav::RangeFactor<PoseParam>(
-              X(correction_count), pars_range_noise, range, -pars_origin,
-              R_rn));
+          graph.add(parnav::RangeFactor<PoseParam>(X(correction_count),
+                                                   pars_range_noise, range,
+                                                   -pars_origin, R_rn));
         }
       }
       if (baro_tick) {
-        graph.add(parnav::BaroFactor<PoseParam>(
-            X(correction_count), D(correction_count), d.z_baro[idx],
-            baro_noise));
+        graph.add(parnav::BaroFactor<PoseParam>(X(correction_count),
+                                                D(correction_count),
+                                                d.z_baro[idx], baro_noise));
       }
     }
 
@@ -665,22 +713,24 @@ int main(int argc, char** argv) {
   // Build a tag for the output prefix so runs don't stomp on each other.
   const char* pre_tag = opts.use_se23 ? "se23" : "se3";
   const char* bias_tag = opts.use_gauss_markov ? "gm" : "cb";
-  const char* ho_tag =
-      opts.handover == Handover::None        ? "no_handover"
-      : opts.handover == Handover::Angle     ? "angle_handover"
-      : opts.handover == Handover::AngleBaro ? "angle_baro_handover"
-                                             : "angle_range_handover";
-  const char* rb_tag = opts.robust == Robust::None          ? "no_robust"
+  const char* ho_tag = opts.handover == Handover::None    ? "no_handover"
+                       : opts.handover == Handover::Angle ? "angle_handover"
+                       : opts.handover == Handover::AngleBaro
+                           ? "angle_baro_handover"
+                           : "angle_range_handover";
+  const char* rb_tag = opts.robust == Robust::None           ? "no_robust"
                        : opts.robust == Robust::GemanMcClure ? "gm"
                                                              : "tukey";
-  opts.output_prefix += std::string(pre_tag) + "_" + bias_tag + "_" + ho_tag +
-                        "_" + rb_tag + "_";
+  opts.output_prefix +=
+      std::string(pre_tag) + "_" + bias_tag + "_" + ho_tag + "_" + rb_tag + "_";
 
   printf("Input:       %s\n", opts.input_file.c_str());
   printf("Output:      %s%s*\n", opts.output_dir.c_str(),
          opts.output_prefix.c_str());
-  printf("State:       %s\n", opts.use_se23 ? "ExtendedPose3 (SE23)" : "Pose3 (SE3)");
-  printf("Bias:        %s\n", opts.use_gauss_markov ? "Gauss-Markov" : "Constant");
+  printf("State:       %s\n",
+         opts.use_se23 ? "ExtendedPose3 (SE23)" : "Pose3 (SE3)");
+  printf("Bias:        %s\n",
+         opts.use_gauss_markov ? "Gauss-Markov" : "Constant");
   printf("Handover:    %s\n", ho_tag);
   printf("Robust:      %s (k=%.4f)\n", rb_tag, opts.robust_threshold);
 
@@ -693,11 +743,15 @@ int main(int argc, char** argv) {
 
   try {
     if (opts.use_gauss_markov) {
-      if (opts.use_se23) run_estimation<GM, true>(*data, opts);
-      else               run_estimation<GM, false>(*data, opts);
+      if (opts.use_se23)
+        run_estimation<GM, true>(*data, opts);
+      else
+        run_estimation<GM, false>(*data, opts);
     } else {
-      if (opts.use_se23) run_estimation<CB, true>(*data, opts);
-      else               run_estimation<CB, false>(*data, opts);
+      if (opts.use_se23)
+        run_estimation<CB, true>(*data, opts);
+      else
+        run_estimation<CB, false>(*data, opts);
     }
   } catch (const gtsam::IndeterminantLinearSystemException& e) {
     std::cerr << "IndeterminantLinearSystemException: " << e.what() << "\n";
