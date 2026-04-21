@@ -6,6 +6,9 @@ add_library(parnav_extensions OBJECT
     RangeFactor.cpp
     AzimuthFactor.cpp
     ElevationFactor.cpp
+    BaroFactor.cpp
+    CompassFactor.cpp
+    GNSSAttFactor.cpp
     PreintegrationHelpers.cpp
 )
 

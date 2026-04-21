@@ -1,0 +1,710 @@
+/**
+ * @file ifac_wc_2026.cpp
+ * @brief Fixed-lag smoother port of the multirotor PARS/GNSS/compass/baro
+ *        experiment (IFAC WC 2026 paper, originally `multirotor_test.cpp`).
+ *
+ * Runs a fixed-lag smoother on a real multirotor CSV log (IMU, GNSS, PARS,
+ * compass/baseline, barometer). Compile-time macros in the original program
+ * have been promoted to runtime CLI flags:
+ *
+ *   --preint {se3|se23}         (default: se3)
+ *   --bias {cb|gm}              (default: cb)
+ *   --handover {none|angle|angle-baro|angle-range}
+ *                               (default: none -> GNSS for the whole run)
+ *   --robust {none|gm|tukey}    (default: none)
+ *
+ * Default configuration is SE3 + CB.
+ */
+
+#include <gtsam/base/Matrix.h>
+#include <gtsam/base/Vector.h>
+#include <gtsam/geometry/ExtendedPose3.h>
+#include <gtsam/geometry/Pose3.h>
+#include <gtsam/geometry/Rot3.h>
+#include <gtsam/geometry/Unit3.h>
+#include <gtsam/inference/Symbol.h>
+#include <gtsam/linear/NoiseModel.h>
+#include <gtsam/navigation/CombinedImuFactor.h>
+#include <gtsam/navigation/CombinedImuFactor2.h>
+#include <gtsam/navigation/GPSFactor.h>
+#include <gtsam/navigation/ImuBias.h>
+#include <gtsam/navigation/ManifoldPreintegrationSE23.h>
+#include <gtsam/navigation/NavState.h>
+#include <gtsam/nonlinear/ISAM2.h>
+#include <gtsam/nonlinear/IncrementalFixedLagSmoother.h>
+#include <gtsam/nonlinear/NonlinearFactor.h>
+#include <gtsam/nonlinear/NonlinearFactorGraph.h>
+#include <gtsam/slam/BetweenFactor.h>
+#include <gtsam/nonlinear/Values.h>
+
+#include <Eigen/Core>
+#include <chrono>
+#include <cstdint>
+#include <fstream>
+#include <iostream>
+#include <optional>
+#include <sstream>
+#include <string>
+#include <type_traits>
+#include <vector>
+
+#include "AzimuthFactor.hpp"
+#include "BaroFactor.hpp"
+#include "CompassFactor.hpp"
+#include "ElevationFactor.hpp"
+#include "GNSSAttFactor.hpp"
+#include "GPSFactorSE23.hpp"
+#include "RangeFactor.hpp"
+#include "utils.hpp"
+
+using parnav::deg2rad;
+using parnav::rad2deg;
+using parnav::ssa;
+
+using gtsam::symbol_shorthand::B;
+using gtsam::symbol_shorthand::D;  // baro bias
+using gtsam::symbol_shorthand::V;
+using gtsam::symbol_shorthand::X;
+
+// ============================================================================
+// CLI / configuration
+// ============================================================================
+
+enum class Handover { None, Angle, AngleBaro, AngleRange };
+enum class Robust { None, GemanMcClure, Tukey };
+
+struct Options {
+  bool use_se23 = false;
+  bool use_gauss_markov = false;
+  Handover handover = Handover::None;
+  Robust robust = Robust::None;
+  double robust_threshold = 0.0;  // auto-filled from scheme default if 0
+
+  std::string input_file =
+      "/Users/ghms/ws/ntnu/parnav/parnav-scripts/post_processing/df_flat_data.csv";
+  std::string output_dir =
+      "/Users/ghms/ws/ntnu/parnav/parnav-scripts/post_processing/";
+  std::string output_prefix = "ifac_wc_2026_";
+};
+
+namespace {
+void print_usage(const char* prog) {
+  std::cerr
+      << "Usage: " << prog << " [options]\n"
+      << "  --preint {se3|se23}         state parameterisation (default: se3)\n"
+      << "  --bias {cb|gm}              bias model (default: cb)\n"
+      << "  --handover {none|angle|angle-baro|angle-range}\n"
+      << "                               aiding handover policy (default: none)\n"
+      << "  --robust {none|gm|tukey}    robust kernel on PARS factors\n"
+      << "  --robust-threshold <v>      kernel threshold (default 1.0 for gm, 4.6851 for tukey)\n"
+      << "  --input <path>\n"
+      << "  --output-dir <path>\n"
+      << "  --output-prefix <str>\n"
+      << "  -h, --help\n";
+}
+
+bool parse_args(int argc, char** argv, Options& o) {
+  auto need = [&](int i, const char* f) {
+    if (i + 1 >= argc) {
+      std::cerr << "Error: " << f << " needs a value\n";
+      return false;
+    }
+    return true;
+  };
+  for (int i = 1; i < argc; ++i) {
+    std::string a = argv[i];
+    if (a == "-h" || a == "--help") {
+      print_usage(argv[0]);
+      std::exit(0);
+    } else if (a == "--preint") {
+      if (!need(i, "--preint")) return false;
+      std::string v = argv[++i];
+      if (v == "se3") o.use_se23 = false;
+      else if (v == "se23") o.use_se23 = true;
+      else { std::cerr << "Unknown --preint " << v << "\n"; return false; }
+    } else if (a == "--bias") {
+      if (!need(i, "--bias")) return false;
+      std::string v = argv[++i];
+      if (v == "cb") o.use_gauss_markov = false;
+      else if (v == "gm") o.use_gauss_markov = true;
+      else { std::cerr << "Unknown --bias " << v << "\n"; return false; }
+    } else if (a == "--handover") {
+      if (!need(i, "--handover")) return false;
+      std::string v = argv[++i];
+      if (v == "none") o.handover = Handover::None;
+      else if (v == "angle") o.handover = Handover::Angle;
+      else if (v == "angle-baro") o.handover = Handover::AngleBaro;
+      else if (v == "angle-range") o.handover = Handover::AngleRange;
+      else { std::cerr << "Unknown --handover " << v << "\n"; return false; }
+    } else if (a == "--robust") {
+      if (!need(i, "--robust")) return false;
+      std::string v = argv[++i];
+      if (v == "none") o.robust = Robust::None;
+      else if (v == "gm") o.robust = Robust::GemanMcClure;
+      else if (v == "tukey") o.robust = Robust::Tukey;
+      else { std::cerr << "Unknown --robust " << v << "\n"; return false; }
+    } else if (a == "--robust-threshold") {
+      if (!need(i, "--robust-threshold")) return false;
+      o.robust_threshold = std::stod(argv[++i]);
+    } else if (a == "--input") {
+      if (!need(i, "--input")) return false;
+      o.input_file = argv[++i];
+    } else if (a == "--output-dir") {
+      if (!need(i, "--output-dir")) return false;
+      o.output_dir = argv[++i];
+      if (!o.output_dir.empty() && o.output_dir.back() != '/')
+        o.output_dir.push_back('/');
+    } else if (a == "--output-prefix") {
+      if (!need(i, "--output-prefix")) return false;
+      o.output_prefix = argv[++i];
+    } else {
+      std::cerr << "Unknown arg: " << a << "\n";
+      print_usage(argv[0]);
+      return false;
+    }
+  }
+  if (o.robust_threshold == 0.0) {
+    o.robust_threshold = (o.robust == Robust::Tukey) ? 4.6851 : 1.0;
+  }
+  return true;
+}
+}  // namespace
+
+// ============================================================================
+// CSV parsing (port of parse_multirotor_csv)
+// ============================================================================
+
+struct MultirotorData {
+  std::vector<double> t;
+  std::vector<Eigen::Vector3d> f_m;
+  std::vector<Eigen::Vector3d> w_m;
+  std::vector<Eigen::Vector3d> z_bt;       // [azi, ele, range]
+  std::vector<Eigen::Vector3d> z_bt_ned;
+  std::vector<int> bt_meas_idx;
+  std::vector<Eigen::Vector3d> z_gnss_ned;
+  std::vector<int> gnss_meas_idx;
+  std::vector<double> yaw;
+  std::vector<int> yaw_idx;
+  std::vector<Eigen::Vector3d> z_gnss_comp;  // baseline vector in nav frame
+  std::vector<double> z_baro;                // pressure [kPa]
+  std::vector<int> baro_idx;
+  std::vector<double> z_gnss_range;
+};
+
+std::optional<MultirotorData> parse_multirotor_csv(const std::string& filename) {
+  std::ifstream file(filename);
+  if (!file) {
+    std::cerr << "Error: Could not open " << filename << "\n";
+    return std::nullopt;
+  }
+  MultirotorData d;
+  std::string line;
+  std::getline(file, line);  // header
+  while (std::getline(file, line)) {
+    std::stringstream ss(line);
+    std::string cell;
+    std::vector<std::string> tok;
+    while (std::getline(ss, cell, ',')) tok.push_back(cell);
+    if (tok.size() != 26) {
+      std::cerr << "Unexpected column count: " << tok.size() << "\n";
+      return std::nullopt;
+    }
+    size_t i = 0;
+    d.t.push_back(std::stod(tok[i++]));
+    d.f_m.emplace_back(std::stod(tok[i]), std::stod(tok[i + 1]), std::stod(tok[i + 2])); i += 3;
+    d.w_m.emplace_back(std::stod(tok[i]), std::stod(tok[i + 1]), std::stod(tok[i + 2])); i += 3;
+    d.z_bt.emplace_back(std::stod(tok[i]), std::stod(tok[i + 1]), std::stod(tok[i + 2])); i += 3;
+    d.z_bt_ned.emplace_back(std::stod(tok[i]), std::stod(tok[i + 1]), std::stod(tok[i + 2])); i += 3;
+    d.bt_meas_idx.push_back(std::stoi(tok[i++]));
+    d.z_gnss_ned.emplace_back(std::stod(tok[i]), std::stod(tok[i + 1]), std::stod(tok[i + 2])); i += 3;
+    d.gnss_meas_idx.push_back(std::stoi(tok[i++]));
+    d.yaw.push_back(std::stod(tok[i++]));
+    d.yaw_idx.push_back(std::stoi(tok[i++]));
+    d.z_gnss_comp.emplace_back(std::stod(tok[i]), std::stod(tok[i + 1]), std::stod(tok[i + 2])); i += 3;
+    d.z_baro.push_back(std::stod(tok[i++]));
+    d.baro_idx.push_back(std::stoi(tok[i++]));
+    d.z_gnss_range.push_back(std::stod(tok[i++]));
+  }
+  return d;
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+namespace {
+
+gtsam::SharedNoiseModel wrap_robust(const gtsam::SharedNoiseModel& base,
+                                    Robust r, double k) {
+  switch (r) {
+    case Robust::None:
+      return base;
+    case Robust::GemanMcClure:
+      return gtsam::noiseModel::Robust::Create(
+          gtsam::noiseModel::mEstimator::GemanMcClure::Create(k), base);
+    case Robust::Tukey:
+      return gtsam::noiseModel::Robust::Create(
+          gtsam::noiseModel::mEstimator::Tukey::Create(k), base);
+  }
+  return base;
+}
+
+struct HandoverCfg {
+  double switch_time;
+  bool use_baro;
+};
+
+HandoverCfg handover_cfg(Handover h) {
+  switch (h) {
+    case Handover::None:       return {1e9,   false};
+    case Handover::Angle:      return {450.0, false};
+    case Handover::AngleBaro:  return {200.0, true};
+    case Handover::AngleRange: return {200.0, false};
+  }
+  return {1e9, false};
+}
+
+void write_vec3(const std::string& path,
+                const std::vector<Eigen::Vector3d>& v) {
+  std::ofstream f(path);
+  f << "x,y,z\n";
+  for (const auto& x : v) f << x.x() << "," << x.y() << "," << x.z() << "\n";
+}
+void write_scalar(const std::string& path, const std::vector<double>& v) {
+  std::ofstream f(path);
+  f << "t\n";
+  for (double x : v) f << x << "\n";
+}
+
+}  // namespace
+
+// ============================================================================
+// Estimation loop
+// ============================================================================
+
+template <class BIAS, bool UseSE23>
+void run_estimation(const MultirotorData& d, const Options& opts) {
+  using PIMLegacy = gtsam::PreintegratedCombinedMeasurementsT<
+      gtsam::ManifoldPreintegration<BIAS>, BIAS>;
+  using FactorLegacy = gtsam::CombinedImuFactorT<PIMLegacy, BIAS>;
+  using PIMSE23 = gtsam::PreintegratedCombinedMeasurements2T<
+      gtsam::ManifoldPreintegrationSE23<BIAS>, BIAS>;
+  using FactorSE23 = gtsam::CombinedImuFactor2T<PIMSE23, BIAS>;
+  using PIM = std::conditional_t<UseSE23, PIMSE23, PIMLegacy>;
+  using ImuFactor = std::conditional_t<UseSE23, FactorSE23, FactorLegacy>;
+  using PoseParam =
+      std::conditional_t<UseSE23, gtsam::ExtendedPose3, gtsam::Pose3>;
+
+  const auto hcfg = handover_cfg(opts.handover);
+  const bool use_baro = hcfg.use_baro;
+
+  // --- Sensor parameters (from original program) ---
+  const double g0 = 9.80665;
+  const double vrw = 0.07;
+  const double arw = 0.15;
+  const double bias_instability_acc = 0.05;  // milli g
+  const double bias_instability_ars = 0.5;   // deg/hour
+  const double T_acc = 3600.0;
+  const double T_ars = 3600.0;
+  const double noise_scaling = 1.2;
+  const double bias_scaling = 50.0;
+
+  const double q_v = std::pow(noise_scaling * vrw / 60.0, 2.0);
+  const double q_o = std::pow((bias_scaling * arw / 60.0) * deg2rad(1.0), 2.0);
+  const double q_b_v =
+      (2.0 / T_acc) * std::pow(bias_scaling * bias_instability_acc * (g0 / 1000.0), 2.0);
+  const double q_b_o =
+      (2.0 / T_ars) *
+      std::pow((bias_scaling * bias_instability_ars / 3600.0) * deg2rad(1.0), 2.0);
+  const double q_p = 1e-40;
+
+  // --- Preintegration params ---
+  auto p = gtsam::PreintegrationCombinedParamsT<BIAS>::MakeSharedD(g0);
+  p->accelerometerCovariance = gtsam::I_3x3 * q_v;
+  p->gyroscopeCovariance = gtsam::I_3x3 * q_o;
+  p->integrationCovariance = gtsam::I_3x3 * q_p;
+  p->biasAccCovariance = gtsam::I_3x3 * q_b_v;
+  p->biasOmegaCovariance = gtsam::I_3x3 * q_b_o;
+
+  // --- Measurement noise models ---
+  gtsam::Matrix3 R_GNSS_pos = gtsam::I_3x3;
+  R_GNSS_pos(0, 0) = std::pow(1.5, 2.0);
+  R_GNSS_pos(1, 1) = std::pow(1.5, 2.0);
+  R_GNSS_pos(2, 2) = std::pow(3.0, 2.0);
+  auto gnss_noise =
+      gtsam::noiseModel::Diagonal::Variances(R_GNSS_pos.diagonal());
+
+  gtsam::Vector3 R_compass_diag(std::pow(2.5 / 100, 2.0),
+                                std::pow(2.5 / 100, 2.0),
+                                std::pow(5.0 / 100, 2.0));
+  auto compass_baseline_noise =
+      gtsam::noiseModel::Diagonal::Variances(R_compass_diag);
+
+  auto yaw_noise = gtsam::noiseModel::Isotropic::Sigma(1, 7.0);
+
+  auto baro_noise = gtsam::noiseModel::Isotropic::Sigma(1, 1.0);
+
+  // PARS noise models (1-d each; robust kernel applied if requested)
+  auto pars_azi_base =
+      gtsam::noiseModel::Isotropic::Sigma(1, deg2rad(5.0));
+  auto pars_ele_base =
+      gtsam::noiseModel::Isotropic::Sigma(1, deg2rad(5.0));
+  auto pars_range_base = gtsam::noiseModel::Isotropic::Sigma(1, 1.5);
+  auto pars_azi_noise = wrap_robust(pars_azi_base, opts.robust, opts.robust_threshold);
+  auto pars_ele_noise = wrap_robust(pars_ele_base, opts.robust, opts.robust_threshold);
+  auto pars_range_noise =
+      wrap_robust(pars_range_base, opts.robust, opts.robust_threshold);
+
+  // --- PARS geometry (fixed constants from original program) ---
+  Eigen::Matrix3d R_rn;
+  R_rn << 0.0297, -0.0824, -0.9962,
+         -0.0379, -0.9960,  0.0813,
+         -0.9988,  0.0353, -0.0327;
+  Eigen::Vector3d pars_origin(0.0601, 0.1740, 0.0436);
+
+  // --- Compass / baseline geometry ---
+  const gtsam::Point3 p_imu_rover_b(0.153, -0.019, -0.302);
+  const gtsam::Point3 p_imu_bm_b(-0.310, 0.156, -0.300);
+  const gtsam::Point3 baseline_body = p_imu_rover_b - p_imu_bm_b;
+
+  // --- Initial state (from original program) ---
+  gtsam::Rot3 R0 = gtsam::Rot3::Quaternion(0.017, 0.0085, -0.0007, 0.9998).normalized();
+  gtsam::Point3 p0 = gtsam::Point3::Zero();
+  gtsam::Vector3 v0 = gtsam::Vector3::Zero();
+
+  const double A_pos = 2.5;
+  const double A_vel = 0.5;
+  const double A_att = 0.15;
+  const double A_acc_bias = (50.0 * g0 / 1000.0);
+  const double A_gyro_bias = deg2rad(360.0 / 3600.0);
+  const double A_baro_bias = 1.0;
+
+  BIAS prior_bias;
+  if constexpr (std::is_same_v<BIAS, gtsam::imuBias::GaussMarkovBias>) {
+    prior_bias = gtsam::imuBias::GaussMarkovBias(
+        gtsam::Vector3::Zero(), gtsam::Vector3::Zero(), T_acc, T_ars);
+  }
+
+  auto bias_noise = gtsam::noiseModel::Diagonal::Sigmas(
+      (gtsam::Vector(6) << A_acc_bias, A_acc_bias, A_acc_bias,
+       A_gyro_bias, A_gyro_bias, A_gyro_bias).finished());
+  auto baro_bias_noise = gtsam::noiseModel::Isotropic::Sigma(1, A_baro_bias);
+
+  // --- Smoother setup ---
+  gtsam::ISAM2Params isam_params;
+  isam_params.relinearizeSkip = 1;
+  isam_params.relinearizeThreshold = 0.001;
+  isam_params.findUnusedFactorSlots = true;
+  const double smoother_lag = 2.0;
+  gtsam::IncrementalFixedLagSmoother smoother(smoother_lag, isam_params);
+
+  gtsam::NonlinearFactorGraph graph;
+  gtsam::Values values;
+  gtsam::FixedLagSmoother::KeyTimestampMap timestamps;
+
+  if constexpr (UseSE23) {
+    auto ep_noise = gtsam::noiseModel::Diagonal::Sigmas(
+        (gtsam::Vector(9) << A_att, A_att, A_att, A_vel, A_vel, A_vel,
+         A_pos, A_pos, A_pos).finished());
+    gtsam::ExtendedPose3 ext0(R0, v0, p0);
+    graph.addPrior<gtsam::ExtendedPose3>(X(0), ext0, ep_noise);
+    values.insert(X(0), ext0);
+    timestamps[X(0)] = 0.0;
+  } else {
+    auto pose_noise = gtsam::noiseModel::Diagonal::Sigmas(
+        (gtsam::Vector(6) << A_att, A_att, A_att, A_pos, A_pos, A_pos).finished());
+    auto vel_noise = gtsam::noiseModel::Isotropic::Sigma(3, A_vel);
+    graph.addPrior<gtsam::Pose3>(X(0), gtsam::Pose3(R0, p0), pose_noise);
+    graph.addPrior<gtsam::Vector3>(V(0), v0, vel_noise);
+    values.insert(X(0), gtsam::Pose3(R0, p0));
+    values.insert(V(0), v0);
+    timestamps[X(0)] = 0.0;
+    timestamps[V(0)] = 0.0;
+  }
+  graph.addPrior<BIAS>(B(0), prior_bias, bias_noise);
+  values.insert(B(0), prior_bias);
+  timestamps[B(0)] = 0.0;
+  if (use_baro) {
+    graph.addPrior<double>(D(0), 0.0, baro_bias_noise);
+    values.insert(D(0), 0.0);
+    timestamps[D(0)] = 0.0;
+  }
+  smoother.update(graph, values, timestamps);
+
+  // --- Predict loop ---
+  auto preintegrated = std::make_shared<PIM>(p, prior_bias);
+
+  using StateType =
+      std::conditional_t<UseSE23, gtsam::ExtendedPose3, gtsam::NavState>;
+  StateType prev_state = [&] {
+    if constexpr (UseSE23) return gtsam::ExtendedPose3(R0, v0, p0);
+    else return gtsam::NavState(gtsam::Pose3(R0, p0), v0);
+  }();
+  BIAS prev_bias = prior_bias;
+  double prev_baro_bias = 0.0;
+
+  // Result storage
+  std::vector<gtsam::Rot3> est_R{R0};
+  std::vector<Eigen::Vector3d> est_p{p0};
+  std::vector<Eigen::Vector3d> est_v{v0};
+  std::vector<Eigen::Vector3d> est_ba{prior_bias.accelerometer()};
+  std::vector<Eigen::Vector3d> est_bg{prior_bias.gyroscope()};
+  std::vector<double> est_baro_bias{0.0};
+  std::vector<Eigen::Vector3d> pos_sigma{Eigen::Vector3d::Zero()};
+  std::vector<Eigen::Vector3d> vel_sigma{Eigen::Vector3d::Zero()};
+  std::vector<Eigen::Vector3d> att_sigma{Eigen::Vector3d::Zero()};
+
+  double accumulated_time = 0.0;
+  int correction_count = 0;
+  const auto start = std::chrono::system_clock::now();
+  const auto N = static_cast<int64_t>(d.t.size());
+
+  for (int64_t idx = 1; idx < N; ++idx) {
+    const double dt = d.t[idx] - d.t[idx - 1];
+    accumulated_time += dt;
+
+    preintegrated->integrateMeasurement(d.f_m[idx], d.w_m[idx], dt);
+
+    const bool before_handover = accumulated_time < hcfg.switch_time;
+    const bool baro_tick =
+        use_baro && d.baro_idx[idx] != 0 && accumulated_time >= 20.0;
+    const bool pre_tick =
+        before_handover && (d.gnss_meas_idx[idx] != 0 || baro_tick);
+    const bool post_tick =
+        !before_handover && (d.bt_meas_idx[idx] != 0 || baro_tick);
+
+    if (!pre_tick && !post_tick) continue;
+
+    correction_count++;
+    const double t_now = d.t[idx];
+
+    graph.resize(0);
+    values.clear();
+    timestamps.clear();
+
+    // --- IMU factor ---
+    if constexpr (UseSE23) {
+      graph.add(ImuFactor(X(correction_count - 1), X(correction_count),
+                          B(correction_count - 1), B(correction_count),
+                          *preintegrated));
+    } else {
+      graph.add(ImuFactor(X(correction_count - 1), V(correction_count - 1),
+                          X(correction_count), V(correction_count),
+                          B(correction_count - 1), B(correction_count),
+                          *preintegrated));
+    }
+
+    // --- Predict and insert initial values ---
+    if constexpr (UseSE23) {
+      gtsam::ExtendedPose3 prop =
+          preintegrated->predict(prev_state, prev_bias);
+      values.insert(X(correction_count), prop);
+      values.insert(B(correction_count), prev_bias);
+      timestamps[X(correction_count)] = t_now;
+      timestamps[B(correction_count)] = t_now;
+    } else {
+      gtsam::NavState prop = preintegrated->predict(prev_state, prev_bias);
+      values.insert(X(correction_count), prop.pose());
+      values.insert(V(correction_count), prop.v());
+      values.insert(B(correction_count), prev_bias);
+      timestamps[X(correction_count)] = t_now;
+      timestamps[V(correction_count)] = t_now;
+      timestamps[B(correction_count)] = t_now;
+    }
+
+    // --- Baro bias random walk + state ---
+    if (use_baro) {
+      auto rw_noise = gtsam::noiseModel::Isotropic::Sigma(1, 1e-3);
+      graph.add(gtsam::BetweenFactor<double>(D(correction_count - 1),
+                                             D(correction_count), 0.0,
+                                             rw_noise));
+      values.insert(D(correction_count), prev_baro_bias);
+      timestamps[D(correction_count)] = t_now;
+    }
+
+    // --- Aiding factors ---
+    if (pre_tick) {
+      if (d.gnss_meas_idx[idx] != 0) {
+        if constexpr (UseSE23) {
+          graph.add(parnav::GPSFactorSE23(X(correction_count),
+                                          d.z_gnss_ned[idx], gnss_noise));
+        } else {
+          graph.add(gtsam::GPSFactor(X(correction_count), d.z_gnss_ned[idx],
+                                     gnss_noise));
+        }
+        graph.add(parnav::GNSSAttFactor<PoseParam>(
+            X(correction_count), d.z_gnss_comp[idx], baseline_body,
+            compass_baseline_noise));
+      }
+      if (baro_tick) {
+        graph.add(parnav::BaroFactor<PoseParam>(
+            X(correction_count), D(correction_count), d.z_baro[idx],
+            baro_noise));
+      }
+    } else if (post_tick) {
+      if (d.bt_meas_idx[idx] != 0) {
+        const double azi = d.z_bt[idx](0);
+        const double ele = d.z_bt[idx](1);
+        const double range = d.z_bt[idx](2);
+        graph.add(parnav::AzimuthFactor<PoseParam>(
+            X(correction_count), pars_azi_noise, azi, -pars_origin, R_rn));
+        graph.add(parnav::ElevationFactor<PoseParam>(
+            X(correction_count), pars_ele_noise, ele, -pars_origin, R_rn));
+        if (!use_baro) {
+          graph.add(parnav::RangeFactor<PoseParam>(
+              X(correction_count), pars_range_noise, range, -pars_origin,
+              R_rn));
+        }
+      }
+      if (baro_tick) {
+        graph.add(parnav::BaroFactor<PoseParam>(
+            X(correction_count), D(correction_count), d.z_baro[idx],
+            baro_noise));
+      }
+    }
+
+    // --- Update smoother ---
+    smoother.update(graph, values, timestamps);
+
+    // --- Extract results ---
+    gtsam::Values result = smoother.calculateEstimate();
+    gtsam::Rot3 R_est;
+    gtsam::Point3 p_est;
+    gtsam::Vector3 v_est;
+    if constexpr (UseSE23) {
+      auto ext = result.at<gtsam::ExtendedPose3>(X(correction_count));
+      prev_state = ext;
+      R_est = ext.rotation();
+      p_est = ext.position();
+      v_est = ext.velocity();
+    } else {
+      auto pose = result.at<gtsam::Pose3>(X(correction_count));
+      auto vel = result.at<gtsam::Vector3>(V(correction_count));
+      prev_state = gtsam::NavState(pose, vel);
+      R_est = pose.rotation();
+      p_est = pose.translation();
+      v_est = vel;
+    }
+    prev_bias = result.at<BIAS>(B(correction_count));
+    if (use_baro) prev_baro_bias = result.at<double>(D(correction_count));
+
+    preintegrated->resetIntegrationAndSetBias(prev_bias);
+
+    est_R.push_back(R_est);
+    est_p.push_back(p_est);
+    est_v.push_back(v_est);
+    est_ba.push_back(prev_bias.accelerometer());
+    est_bg.push_back(prev_bias.gyroscope());
+    est_baro_bias.push_back(prev_baro_bias);
+
+    // Marginal sigmas
+    Eigen::Vector3d sp = Eigen::Vector3d::Zero();
+    Eigen::Vector3d sv = Eigen::Vector3d::Zero();
+    Eigen::Vector3d sa = Eigen::Vector3d::Zero();
+    try {
+      if constexpr (UseSE23) {
+        gtsam::Matrix C = smoother.marginalCovariance(X(correction_count));
+        sa << std::sqrt(C(0, 0)), std::sqrt(C(1, 1)), std::sqrt(C(2, 2));
+        sv << std::sqrt(C(3, 3)), std::sqrt(C(4, 4)), std::sqrt(C(5, 5));
+        sp << std::sqrt(C(6, 6)), std::sqrt(C(7, 7)), std::sqrt(C(8, 8));
+      } else {
+        gtsam::Matrix Cp = smoother.marginalCovariance(X(correction_count));
+        gtsam::Matrix Cv = smoother.marginalCovariance(V(correction_count));
+        sa << std::sqrt(Cp(0, 0)), std::sqrt(Cp(1, 1)), std::sqrt(Cp(2, 2));
+        sp << std::sqrt(Cp(3, 3)), std::sqrt(Cp(4, 4)), std::sqrt(Cp(5, 5));
+        sv << std::sqrt(Cv(0, 0)), std::sqrt(Cv(1, 1)), std::sqrt(Cv(2, 2));
+      }
+    } catch (const std::exception&) {
+      // fall through with zeros
+    }
+    pos_sigma.push_back(sp);
+    vel_sigma.push_back(sv);
+    att_sigma.push_back(sa);
+
+    if (correction_count % 100 == 0) {
+      printf("step %lld  t=%.2f  p=[%.2f %.2f %.2f]\n",
+             static_cast<long long>(idx), t_now, p_est.x(), p_est.y(),
+             p_est.z());
+    }
+  }
+
+  auto end = std::chrono::system_clock::now();
+  std::chrono::duration<double> elapsed = end - start;
+  printf("Final position: [%.4f, %.4f, %.4f]\n", est_p.back().x(),
+         est_p.back().y(), est_p.back().z());
+  printf("Elapsed: %.3f s | data horizon: %.1f s\n", elapsed.count(),
+         accumulated_time);
+
+  // --- Save ---
+  const std::string pre = opts.output_dir + opts.output_prefix;
+  std::vector<Eigen::Vector3d> att_rpy;
+  att_rpy.reserve(est_R.size());
+  for (const auto& R : est_R)
+    att_rpy.emplace_back(R.roll(), R.pitch(), R.yaw());
+  write_scalar(pre + "time.csv", d.t);
+  write_vec3(pre + "pos.csv", est_p);
+  write_vec3(pre + "vel.csv", est_v);
+  write_vec3(pre + "att.csv", att_rpy);
+  write_vec3(pre + "acc.csv", est_ba);
+  write_vec3(pre + "gyro.csv", est_bg);
+  write_vec3(pre + "pos_std.csv", pos_sigma);
+  write_vec3(pre + "vel_std.csv", vel_sigma);
+  write_vec3(pre + "att_std.csv", att_sigma);
+  if (use_baro) write_scalar(pre + "baro.csv", est_baro_bias);
+  printf("Saved results to %s*\n", pre.c_str());
+}
+
+// ============================================================================
+// Main
+// ============================================================================
+
+int main(int argc, char** argv) {
+  Options opts;
+  if (!parse_args(argc, argv, opts)) return 1;
+
+  // Build a tag for the output prefix so runs don't stomp on each other.
+  const char* pre_tag = opts.use_se23 ? "se23" : "se3";
+  const char* bias_tag = opts.use_gauss_markov ? "gm" : "cb";
+  const char* ho_tag =
+      opts.handover == Handover::None        ? "no_handover"
+      : opts.handover == Handover::Angle     ? "angle_handover"
+      : opts.handover == Handover::AngleBaro ? "angle_baro_handover"
+                                             : "angle_range_handover";
+  const char* rb_tag = opts.robust == Robust::None          ? "no_robust"
+                       : opts.robust == Robust::GemanMcClure ? "gm"
+                                                             : "tukey";
+  opts.output_prefix += std::string(pre_tag) + "_" + bias_tag + "_" + ho_tag +
+                        "_" + rb_tag + "_";
+
+  printf("Input:       %s\n", opts.input_file.c_str());
+  printf("Output:      %s%s*\n", opts.output_dir.c_str(),
+         opts.output_prefix.c_str());
+  printf("State:       %s\n", opts.use_se23 ? "ExtendedPose3 (SE23)" : "Pose3 (SE3)");
+  printf("Bias:        %s\n", opts.use_gauss_markov ? "Gauss-Markov" : "Constant");
+  printf("Handover:    %s\n", ho_tag);
+  printf("Robust:      %s (k=%.4f)\n", rb_tag, opts.robust_threshold);
+
+  auto data = parse_multirotor_csv(opts.input_file);
+  if (!data) return 1;
+  printf("Loaded %zu samples\n", data->t.size());
+
+  using GM = gtsam::imuBias::GaussMarkovBias;
+  using CB = gtsam::imuBias::ConstantBias;
+
+  try {
+    if (opts.use_gauss_markov) {
+      if (opts.use_se23) run_estimation<GM, true>(*data, opts);
+      else               run_estimation<GM, false>(*data, opts);
+    } else {
+      if (opts.use_se23) run_estimation<CB, true>(*data, opts);
+      else               run_estimation<CB, false>(*data, opts);
+    }
+  } catch (const gtsam::IndeterminantLinearSystemException& e) {
+    std::cerr << "IndeterminantLinearSystemException: " << e.what() << "\n";
+    return 2;
+  } catch (const std::exception& e) {
+    std::cerr << "Exception: " << e.what() << "\n";
+    return 2;
+  }
+  return 0;
+}
