@@ -68,7 +68,7 @@ constexpr double tau_gyro = 3600.0;
 constexpr double smoother_lag = 10.0;
 
 /// Aiding scheme
-enum class Aiding { GNSS, PARSFull };
+enum class Aiding { GNSS, PARSFull, None };
 
 /// GNSS bootstrap duration [s] — when using PARS, GNSS is used for the first
 /// N seconds to initialise the filter before switching to PARS aiding.
@@ -88,6 +88,10 @@ struct Options {
   Aiding aiding_scheme = Aiding::PARSFull;
   std::string input_file = default_input_file;
   std::string output_dir = default_output_dir;
+  std::string output_suffix;   // Appended before `.csv` in the output filename.
+  double duration = 0.0;       // Run-length cap in seconds; 0 = run to end.
+  bool init_from_truth = false;  // When true, initialise state from truth
+                                 // (auto-enabled for Aiding::None).
 };
 
 // ============================================================================
@@ -285,11 +289,26 @@ void run_estimation(const SimulationData& sd, const Options& opts) {
   p->biasOmegaCovariance = gtsam::I_3x3 * sigma_b_ars * sigma_b_ars;
 
   // --- Initial state ---
-  Eigen::Vector4d q0 = sd.init_att();  // qx, qy, qz, qw
+  // Use the ground-truth state at t=0 when requested (typical for the
+  // aiding=none uncertainty-growth study); otherwise use the noisy
+  // initial-estimate columns from the CSV.
+  Eigen::Vector4d q0;
+  gtsam::Point3 p0;
+  gtsam::Vector3 v0;
+  if (opts.init_from_truth) {
+    Eigen::MatrixXd true_att0 = sd.true_att();
+    Eigen::MatrixXd true_pos0 = sd.true_pos();
+    Eigen::MatrixXd true_vel0 = sd.true_vel();
+    q0 << true_att0(0, 0), true_att0(1, 0), true_att0(2, 0), true_att0(3, 0);
+    p0 = Eigen::Vector3d(true_pos0(0, 0), true_pos0(1, 0), true_pos0(2, 0));
+    v0 = Eigen::Vector3d(true_vel0(0, 0), true_vel0(1, 0), true_vel0(2, 0));
+  } else {
+    q0 = sd.init_att();  // qx, qy, qz, qw
+    p0 = sd.init_pos();
+    v0 = sd.init_vel();
+  }
   gtsam::Rot3 R0 = gtsam::Rot3::Quaternion(q0(0), q0(1), q0(2), q0(3));
-  gtsam::Point3 p0 = sd.init_pos();
   gtsam::Pose3 pose0(R0, p0);
-  gtsam::Vector3 v0 = sd.init_vel();
 
   BIAS prior_bias;
   if constexpr (std::is_same_v<BIAS, gtsam::imuBias::GaussMarkovBias>) {
@@ -403,7 +422,14 @@ void run_estimation(const SimulationData& sd, const Options& opts) {
 
   const auto start_time = std::chrono::system_clock::now();
 
-  for (uint64_t idx = 1; idx < sd.N; ++idx) {
+  // Optional run-length cap (0 disables).
+  const uint64_t max_idx =
+      (opts.duration > 0.0)
+          ? std::min<uint64_t>(
+                sd.N, static_cast<uint64_t>(opts.duration / dt) + 1)
+          : sd.N;
+
+  for (uint64_t idx = 1; idx < max_idx; ++idx) {
     Eigen::Vector3d f = imu_f.row(idx).transpose();
     Eigen::Vector3d w = imu_w.row(idx).transpose();
     preintegrated->integrateMeasurement(f, w, dt);
@@ -413,6 +439,105 @@ void run_estimation(const SimulationData& sd, const Options& opts) {
     if (is_update_step) {
       correction_count++;
       double timestamp = idx * dt;
+
+      // ---------------------------------------------------------------
+      // Aiding::None — pure prediction, no smoother update.
+      //
+      // Keep integrating the PIM (never reset) so the 15x15 preintMeasCov
+      // grows monotonically, then read off 3-sigma bounds from it.
+      // Covariance block layout in preintMeasCov_ (both variants):
+      //   legacy: [R(0-2), pos(3-5), vel(6-8), ba(9-11), bg(12-14)]
+      //   se23:   [theta(0-2), nu/vel(3-5), rho/pos(6-8), ba(9-11), bg(12-14)]
+      // ---------------------------------------------------------------
+      if (opts.aiding_scheme == Aiding::None) {
+        gtsam::Rot3 R_est;
+        gtsam::Point3 p_est;
+        gtsam::Vector3 v_est;
+        if constexpr (UseSE23) {
+          gtsam::ExtendedPose3 prop =
+              preintegrated->predict(prev_state, prev_bias_estimate);
+          R_est = prop.rotation();
+          p_est = prop.position();
+          v_est = prop.velocity();
+        } else {
+          gtsam::NavState prop =
+              preintegrated->predict(prev_state, prev_bias_estimate);
+          R_est = prop.pose().rotation();
+          p_est = prop.pose().translation();
+          v_est = prop.v();
+        }
+        // Do not update prev_state / prev_bias_estimate: we keep predicting
+        // from the (truth-) initialised state using the accumulating PIM.
+
+        est_pos.push_back(p_est);
+        est_vel.push_back(v_est);
+        est_att.push_back(R_est);
+        est_acc_bias.push_back(prev_bias_estimate.accelerometer());
+        est_gyro_bias.push_back(prev_bias_estimate.gyroscope());
+
+        Eigen::Vector3d p_err =
+            p_est - Eigen::Vector3d(true_pos(0, idx), true_pos(1, idx),
+                                    true_pos(2, idx));
+        Eigen::Vector3d v_err =
+            v_est - Eigen::Vector3d(true_vel(0, idx), true_vel(1, idx),
+                                    true_vel(2, idx));
+        gtsam::Rot3 R_true =
+            gtsam::Rot3::Quaternion(true_att(0, idx), true_att(1, idx),
+                                    true_att(2, idx), true_att(3, idx));
+        Eigen::Vector3d a_err(ssa(R_est.roll() - R_true.roll()),
+                              ssa(R_est.pitch() - R_true.pitch()),
+                              ssa(R_est.yaw() - R_true.yaw()));
+        Eigen::Vector3d ab_err =
+            prev_bias_estimate.accelerometer() -
+            Eigen::Vector3d(true_ab(0, idx), true_ab(1, idx), true_ab(2, idx));
+        Eigen::Vector3d gb_err =
+            prev_bias_estimate.gyroscope() -
+            Eigen::Vector3d(true_gb(0, idx), true_gb(1, idx), true_gb(2, idx));
+        pos_err.push_back(p_err);
+        vel_err.push_back(v_err);
+        att_err.push_back(a_err);
+        acc_bias_err.push_back(ab_err);
+        gyro_bias_err.push_back(gb_err);
+
+        // 3-sigma directly from the preintegrated measurement covariance.
+        Eigen::Matrix<double, 15, 15> cov = preintegrated->preintMeasCov();
+        Eigen::Matrix<double, 15, 1> sig3;
+        // roll/pitch/yaw
+        sig3(0) = 3.0 * std::sqrt(cov(0, 0));
+        sig3(1) = 3.0 * std::sqrt(cov(1, 1));
+        sig3(2) = 3.0 * std::sqrt(cov(2, 2));
+        if constexpr (UseSE23) {
+          // SE23: vel at 3-5, pos at 6-8.
+          sig3(6) = 3.0 * std::sqrt(cov(3, 3));
+          sig3(7) = 3.0 * std::sqrt(cov(4, 4));
+          sig3(8) = 3.0 * std::sqrt(cov(5, 5));
+          sig3(3) = 3.0 * std::sqrt(cov(6, 6));
+          sig3(4) = 3.0 * std::sqrt(cov(7, 7));
+          sig3(5) = 3.0 * std::sqrt(cov(8, 8));
+        } else {
+          // Legacy: pos at 3-5, vel at 6-8.
+          sig3(3) = 3.0 * std::sqrt(cov(3, 3));
+          sig3(4) = 3.0 * std::sqrt(cov(4, 4));
+          sig3(5) = 3.0 * std::sqrt(cov(5, 5));
+          sig3(6) = 3.0 * std::sqrt(cov(6, 6));
+          sig3(7) = 3.0 * std::sqrt(cov(7, 7));
+          sig3(8) = 3.0 * std::sqrt(cov(8, 8));
+        }
+        // Bias blocks (same layout for both): acc 9-11, gyro 12-14.
+        for (int k = 0; k < 6; ++k)
+          sig3(9 + k) = 3.0 * std::sqrt(cov(9 + k, 9 + k));
+        three_sigma.push_back(sig3);
+
+        if (correction_count % 100 == 0) {
+          printf(
+              "Step %llu/%llu (pred) | Pos: %.4f m | Vel: %.4f m/s | Att: "
+              "%.4f deg\n",
+              static_cast<unsigned long long>(idx),
+              static_cast<unsigned long long>(sd.N), p_err.norm(), v_err.norm(),
+              rad2deg(a_err.norm()));
+        }
+        continue;  // skip smoother update entirely
+      }
 
       graph.resize(0);
       values.clear();
@@ -451,7 +576,8 @@ void run_estimation(const SimulationData& sd, const Options& opts) {
         timestamps[B(correction_count)] = timestamp;
       }
 
-      // Determine active aiding: when using PARS, bootstrap with GNSS first
+      // Determine active aiding: when using PARS, bootstrap with GNSS first.
+      // Aiding::None skips the bootstrap entirely (IMU-only propagation).
       bool in_bootstrap = (timestamp < gnss_bootstrap_duration);
       Aiding active_aiding =
           (opts.aiding_scheme == Aiding::PARSFull && in_bootstrap)
@@ -459,7 +585,9 @@ void run_estimation(const SimulationData& sd, const Options& opts) {
               : opts.aiding_scheme;
 
       // Add aiding factors
-      if (active_aiding == Aiding::GNSS) {
+      if (active_aiding == Aiding::None) {
+        // No aiding — purely IMU-driven covariance growth.
+      } else if (active_aiding == Aiding::GNSS) {
         gtsam::Point3 gps_meas(gnss_pos(0, idx), gnss_pos(1, idx),
                                gnss_pos(2, idx));
         if constexpr (UseSE23) {
@@ -621,8 +749,8 @@ void run_estimation(const SimulationData& sd, const Options& opts) {
   std::string bias_tag =
       std::is_same_v<BIAS, gtsam::imuBias::GaussMarkovBias> ? "gm" : "cb";
   std::string se23_tag = UseSE23 ? "_se23" : "";
-  std::string output_file =
-      opts.output_dir + "gtsam_fork_test_" + bias_tag + se23_tag + ".csv";
+  std::string output_file = opts.output_dir + "gtsam_fork_test_" + bias_tag +
+                            se23_tag + opts.output_suffix + ".csv";
   std::ofstream out(output_file);
   if (!out) {
     std::cerr << "Error: Could not open output file " << output_file << "\n";
@@ -693,9 +821,16 @@ void print_usage(const char* prog) {
       << "                                    CombinedImuFactor2 on ExtendedPose3\n"
       << "                           legacy = ManifoldPreintegration +\n"
       << "                                    CombinedImuFactor on (Pose3, Vector3)\n"
-      << "  --aiding {gnss|pars}     aiding scheme (default: pars)\n"
+      << "  --aiding {gnss|pars|none} aiding scheme (default: pars)\n"
+      << "                           none = IMU-only; auto-enables init\n"
+      << "                                  from ground truth\n"
+      << "  --duration <seconds>     cap run length (0 = full data, default 0)\n"
+      << "  --init-from-truth        initialise state from truth columns\n"
+      << "                           (default on when --aiding none)\n"
       << "  --input <path>           input simulation CSV\n"
       << "  --output-dir <path>      output directory for result CSVs\n"
+      << "  --output-suffix <str>    suffix appended before .csv\n"
+      << "                           (e.g. _none_10s)\n"
       << "  -h, --help               show this help and exit\n";
 }
 
@@ -729,7 +864,16 @@ bool parse_args(int argc, char** argv, Options& opts) {
       std::string v = argv[++i];
       if (v == "gnss") opts.aiding_scheme = Aiding::GNSS;
       else if (v == "pars") opts.aiding_scheme = Aiding::PARSFull;
+      else if (v == "none") opts.aiding_scheme = Aiding::None;
       else { std::cerr << "Unknown --aiding value: " << v << "\n"; return false; }
+    } else if (a == "--duration") {
+      if (!need_value(i, a)) return false;
+      opts.duration = std::stod(argv[++i]);
+    } else if (a == "--init-from-truth") {
+      opts.init_from_truth = true;
+    } else if (a == "--output-suffix") {
+      if (!need_value(i, a)) return false;
+      opts.output_suffix = argv[++i];
     } else if (a == "--input") {
       if (!need_value(i, a)) return false;
       opts.input_file = argv[++i];
@@ -753,6 +897,12 @@ int main(int argc, char* argv[]) {
   Options opts;
   if (!parse_args(argc, argv, opts)) return 1;
 
+  // No-aiding runs default to initialising at ground truth so the plot shows
+  // pure covariance growth (errors start at zero).
+  if (opts.aiding_scheme == Aiding::None) {
+    opts.init_from_truth = true;
+  }
+
   printf("Reading simulation data from: %s\n", opts.input_file.c_str());
   auto sd = read_simulation_csv(opts.input_file);
   if (!sd) {
@@ -763,9 +913,13 @@ int main(int argc, char* argv[]) {
   printf("Number of PARS beacons: %d\n", sd->num_locators());
   printf("Mode: %s\n", opts.use_se23 ? "SE_2(3) CombinedImuFactor2"
                                      : "Legacy CombinedImuFactor");
-  printf("Aiding: %s\n",
-         opts.aiding_scheme == Aiding::PARSFull ? "PARS (GNSS bootstrap)"
-                                                : "GNSS");
+  const char* aiding_name =
+      opts.aiding_scheme == Aiding::PARSFull ? "PARS (GNSS bootstrap)"
+      : opts.aiding_scheme == Aiding::GNSS   ? "GNSS"
+                                             : "None (IMU-only)";
+  printf("Aiding: %s\n", aiding_name);
+  if (opts.duration > 0.0) printf("Duration cap: %.1f s\n", opts.duration);
+  if (opts.init_from_truth) printf("Initial state: ground truth\n");
 
   // Runtime dispatch to the 4 (BIAS, UseSE23) template instantiations.
   using GM = gtsam::imuBias::GaussMarkovBias;

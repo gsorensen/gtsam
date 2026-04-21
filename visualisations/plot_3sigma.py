@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """Plot estimation errors with 3-sigma bounds in a 5x3 grid.
 
-Supports comparing Gauss-Markov and Constant Bias results side by side.
-If both files exist, both are plotted on the same axes.
+Compares up to four (preintegrator, bias) variants on the same axes:
+  - SE3  + Constant Bias    → gtsam_fork_test_cb.csv
+  - SE3  + Gauss-Markov     → gtsam_fork_test_gm.csv
+  - SE23 + Constant Bias    → gtsam_fork_test_cb_se23.csv
+  - SE23 + Gauss-Markov     → gtsam_fork_test_gm_se23.csv
+
+Any subset that exists on disk will be plotted.
 """
 
 import argparse
@@ -16,11 +21,13 @@ import pandas as pd
 # Configuration
 # ============================================================================
 
-# Plot order: the first entry is drawn on top (in front).
-# Swap the two entries to change which model is plotted in front.
+# (tag, filename_suffix, label, error_color, sigma_color)
+# Earlier entries are drawn last (on top). Reorder to change layering.
 PLOT_ORDER = [
-    ("gm", "Gauss-Markov", "blue", "red"),
-    ("cb", "Constant Bias", "green", "orange"),
+    ("se23_gm", "gm_se23", "SE23 + GM", "tab:blue",   "tab:cyan"),
+    ("se23_cb", "cb_se23", "SE23 + CB", "tab:green",  "tab:olive"),
+    ("se3_gm",  "gm",      "SE3 + GM",  "tab:red",    "tab:orange"),
+    ("se3_cb",  "cb",      "SE3 + CB",  "tab:purple", "tab:pink"),
 ]
 
 RESULTS_DIR = "/Users/ghms/ws/ntnu/parnav_ins_sim/results"
@@ -28,35 +35,51 @@ RESULTS_DIR = "/Users/ghms/ws/ntnu/parnav_ins_sim/results"
 # ============================================================================
 
 
+def tag_from_path(path: str) -> str:
+    """Infer a PLOT_ORDER tag from an explicit CSV path."""
+    base = os.path.basename(path)
+    if "_se23" in base:
+        return "se23_gm" if "_gm" in base else "se23_cb"
+    return "se3_gm" if "_gm" in base else "se3_cb"
+
+
 def main():
     parser = argparse.ArgumentParser(description="Plot 3-sigma error bounds")
     parser.add_argument(
         "--dir",
         default=RESULTS_DIR,
-        help="Directory containing gtsam_fork_test_{gm,cb}.csv",
+        help="Directory containing gtsam_fork_test_{cb,gm}[_se23].csv",
     )
     parser.add_argument(
         "--csv",
         nargs="*",
         help="Explicit CSV file path(s). Overrides --dir auto-detection.",
     )
+    parser.add_argument(
+        "--suffix",
+        default="",
+        help="Suffix appended before .csv when auto-detecting "
+             "(e.g. '_none_10s'). Empty matches the default filenames.",
+    )
     args = parser.parse_args()
 
-    # Build list of (label, dataframe, err_color, sig_color)
+    # Index PLOT_ORDER by tag for quick lookup.
+    by_tag = {e[0]: e for e in PLOT_ORDER}
+
+    # Build list of (label, dataframe, err_color, sig_color).
+    # Draw back-to-front: last appended is drawn on top, matching PLOT_ORDER
+    # where the first entry should appear in front.
     datasets = []
 
     if args.csv:
-        # Explicit files provided
         for path in args.csv:
-            tag = "gm" if "_gm" in os.path.basename(path) else "cb"
-            entry = next((e for e in PLOT_ORDER if e[0] == tag), PLOT_ORDER[0])
+            entry = by_tag.get(tag_from_path(path), PLOT_ORDER[0])
             df = pd.read_csv(path)
-            datasets.append((entry[1], df, entry[2], entry[3]))
+            datasets.append((entry[2], df, entry[3], entry[4]))
     else:
-        # Auto-detect from results directory, respecting PLOT_ORDER
-        # Draw back-to-front: last in list is drawn last (on top)
-        for tag, label, err_col, sig_col in reversed(PLOT_ORDER):
-            path = os.path.join(args.dir, f"gtsam_fork_test_{tag}.csv")
+        for tag, suffix, label, err_col, sig_col in reversed(PLOT_ORDER):
+            path = os.path.join(
+                args.dir, f"gtsam_fork_test_{suffix}{args.suffix}.csv")
             if os.path.exists(path):
                 df = pd.read_csv(path)
                 datasets.append((label, df, err_col, sig_col))
@@ -96,6 +119,9 @@ def main():
     fig, axes = plt.subplots(5, 3, figsize=(16, 14), sharex=True)
     fig.suptitle(f"Estimation errors with 3-sigma bounds — {title}", fontsize=14)
 
+    # Reduce sigma fill alpha when many datasets overlap.
+    fill_alpha = 0.06 if n_datasets <= 2 else 0.04
+
     for i, (err_col, sig_col, label, unit, to_deg) in enumerate(grid):
         row, col = divmod(i, 3)
         ax = axes[row, col]
@@ -118,19 +144,28 @@ def main():
                     label=f"+3$\\sigma${suffix}")
             ax.plot(t, -sig3, color=color_sig, linestyle="--", linewidth=0.8,
                     label=f"-3$\\sigma${suffix}")
-            ax.fill_between(t, -sig3, sig3, color=color_sig, alpha=0.06)
+            ax.fill_between(t, -sig3, sig3, color=color_sig, alpha=fill_alpha)
 
         ax.set_ylabel(f"{label} [{unit}]", fontsize=8)
         ax.tick_params(labelsize=7)
         ax.grid(True, alpha=0.3)
 
-        if row == 0 and col == 2:
-            ax.legend(fontsize=6, loc="upper right", ncol=n_datasets)
+    # Build a compact shared legend at the figure level (one entry per dataset
+    # for the error line, plus a single dashed marker for ±3σ).
+    from matplotlib.lines import Line2D
+    handles = []
+    for ds_label, _, color_err, color_sig in datasets:
+        handles.append(Line2D([0], [0], color=color_err, linewidth=1.2,
+                              label=f"Error ({ds_label})"))
+        handles.append(Line2D([0], [0], color=color_sig, linestyle="--",
+                              linewidth=1.2, label=f"±3$\\sigma$ ({ds_label})"))
+    fig.legend(handles=handles, loc="upper right", fontsize=7,
+               ncol=min(n_datasets, 4), framealpha=0.9)
 
     for ax in axes[-1, :]:
         ax.set_xlabel("Time [s]", fontsize=9)
 
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
     out_name = os.path.join(args.dir, "3sigma_comparison.png")
     plt.savefig(out_name, dpi=150)
     print(f"Saved to {out_name}")
