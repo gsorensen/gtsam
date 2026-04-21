@@ -59,8 +59,11 @@ inline Vector9 se23_Logmap(const Matrix5& T) {
 }
 
 /// SE_2(3) Ypsilon_hat(w_hat, f_hat, dt) — Eq. 36 Brossard et al.
-inline Matrix5 se23_Ypsilon_hat(const Vector3& w_hat, const Vector3& f_hat,
-                                double dt) {
+/// No longer used for state propagation (we compose intrinsically instead to
+/// keep R on SO(3)); retained for reference / potential covariance checks.
+[[maybe_unused]] inline Matrix5 se23_Ypsilon_hat(const Vector3& w_hat,
+                                                 const Vector3& f_hat,
+                                                 double dt) {
   const double dt22 = 0.5 * dt * dt;
   Matrix5 T = Matrix5::Identity();
   T.block<3, 3>(0, 0) = Rot3::Expmap(w_hat * dt).matrix();
@@ -71,7 +74,7 @@ inline Matrix5 se23_Ypsilon_hat(const Vector3& w_hat, const Vector3& f_hat,
 
 /// Phi_t(T, dt) = (R, v, p + dt * v) — Eq. 25 Brossard et al. Applied to a
 /// 5x5 homogeneous SE_2(3) matrix.
-inline Matrix5 se23_Phi_t(const Matrix5& T, double dt) {
+[[maybe_unused]] inline Matrix5 se23_Phi_t(const Matrix5& T, double dt) {
   Matrix5 Tp = T;
   Tp.block<3, 1>(0, 4) = T.block<3, 1>(0, 4) + dt * T.block<3, 1>(0, 3);
   return Tp;
@@ -167,9 +170,23 @@ void ManifoldPreintegrationSE23<Bias>::update(const Vector3& measuredAcc,
   //      X_j = Gamma_T(g) * Phi_T(X_i) * Z_j.
   //    F_dt (which has dt*I at the rho/nu block) is precisely the tangent-space
   //    counterpart of this recursion.
-  const Matrix5 newDeltaXij =
-      se23_Phi_t(deltaXij_.matrix(), dt) * se23_Ypsilon_hat(omega, acc, dt);
-  deltaXij_ = ExtendedPose3(newDeltaXij);
+  //
+  //    NOTE: we do NOT compose via a generic 5x5 matrix product + reslice —
+  //    doing so lets the rotation block drift off SO(3) under accumulation,
+  //    and ExtendedPose3(Matrix5) slices the 3x3 without re-orthogonalizing.
+  //    After ~tens of seconds the non-orthogonality is large enough to flip
+  //    the quaternion conversion branch and cause a visible attitude jump.
+  //    Instead compose intrinsically: Rot3::Expmap keeps R on SO(3) exactly,
+  //    and v/p get the algebraically equivalent updates that Phi_t * Ypsilon
+  //    yields for an exact SO(3) rotation block.
+  const Rot3    R_i = deltaXij_.rotation();
+  const Vector3 v_i = deltaXij_.velocity();
+  const Vector3 p_i = deltaXij_.position();
+  const Vector3 Ra  = R_i * acc;
+  const Rot3    R_new = R_i * Rot3::Expmap(omega * dt);
+  const Vector3 v_new = v_i + Ra * dt;
+  const Vector3 p_new = p_i + v_i * dt + Ra * (0.5 * dt * dt);
+  deltaXij_ = ExtendedPose3(R_new, v_new, p_new);
 
   // 4. Linearized transition + measurement Jacobians.
   const Matrix9 F = se23_F_dt(dt);

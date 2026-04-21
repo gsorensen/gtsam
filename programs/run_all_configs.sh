@@ -70,7 +70,7 @@ COMMON_ARGS=(--aiding "$AIDING")
 [[ -n "$DURATION" ]]   && COMMON_ARGS+=(--duration "$DURATION")
 [[ -n "$SUFFIX" ]]     && COMMON_ARGS+=(--output-suffix "$SUFFIX")
 [[ -n "$OUTPUT_DIR" ]] && COMMON_ARGS+=(--output-dir "$OUTPUT_DIR")
-COMMON_ARGS+=("${EXTRA_ARGS[@]}")
+COMMON_ARGS+=(${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"})
 
 # (preint, bias) — 4 configs.
 CONFIGS=(
