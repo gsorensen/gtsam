@@ -123,9 +123,11 @@ bool ManifoldPreintegrationSE23<Bias>::equals(
          deltaXij_.equals(other.deltaXij_, tol) &&
          equal_with_abs_tol(delRdelBiasOmega_, other.delRdelBiasOmega_, tol) &&
          equal_with_abs_tol(delNUdelBiasAcc_, other.delNUdelBiasAcc_, tol) &&
-         equal_with_abs_tol(delNUdelBiasOmega_, other.delNUdelBiasOmega_, tol) &&
+         equal_with_abs_tol(delNUdelBiasOmega_, other.delNUdelBiasOmega_,
+                            tol) &&
          equal_with_abs_tol(delRHOdelBiasAcc_, other.delRHOdelBiasAcc_, tol) &&
-         equal_with_abs_tol(delRHOdelBiasOmega_, other.delRHOdelBiasOmega_, tol);
+         equal_with_abs_tol(delRHOdelBiasOmega_, other.delRHOdelBiasOmega_,
+                            tol);
 }
 
 //------------------------------------------------------------------------------
@@ -179,11 +181,11 @@ void ManifoldPreintegrationSE23<Bias>::update(const Vector3& measuredAcc,
   //    Instead compose intrinsically: Rot3::Expmap keeps R on SO(3) exactly,
   //    and v/p get the algebraically equivalent updates that Phi_t * Ypsilon
   //    yields for an exact SO(3) rotation block.
-  const Rot3    R_i = deltaXij_.rotation();
+  const Rot3 R_i = deltaXij_.rotation();
   const Vector3 v_i = deltaXij_.velocity();
   const Vector3 p_i = deltaXij_.position();
-  const Vector3 Ra  = R_i * acc;
-  const Rot3    R_new = R_i * Rot3::Expmap(omega * dt);
+  const Vector3 Ra = R_i * acc;
+  const Rot3 R_new = R_i * Rot3::Expmap(omega * dt);
   const Vector3 v_new = v_i + Ra * dt;
   const Vector3 p_new = p_i + v_i * dt + Ra * (0.5 * dt * dt);
   deltaXij_ = ExtendedPose3(R_new, v_new, p_new);
@@ -275,4 +277,5 @@ Vector9 ManifoldPreintegrationSE23<Bias>::biasCorrectedDelta(
 
 // Explicit instantiations.
 template class gtsam::ManifoldPreintegrationSE23<gtsam::imuBias::ConstantBias>;
-template class gtsam::ManifoldPreintegrationSE23<gtsam::imuBias::GaussMarkovBias>;
+template class gtsam::ManifoldPreintegrationSE23<
+    gtsam::imuBias::GaussMarkovBias>;
