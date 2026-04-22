@@ -81,7 +81,21 @@ def load(args):
     return merged, tru
 
 
-def plot_yaw_error(merged, out_dir):
+def yaw_rate_truth(merged):
+    """Truth yaw rate at debug-row times (deg/s)."""
+    yaw = merged["yaw"].to_numpy()
+    t = merged["t"].to_numpy()
+    return np.degrees(np.gradient(np.unwrap(yaw), t))
+
+
+def maneuver_mask(merged, max_yaw_rate_deg_s):
+    """True for samples within a low-|yaw_rate| window (between maneuvers)."""
+    if max_yaw_rate_deg_s is None or max_yaw_rate_deg_s <= 0:
+        return np.ones(len(merged), dtype=bool)
+    return np.abs(yaw_rate_truth(merged)) <= max_yaw_rate_deg_s
+
+
+def plot_yaw_error(merged, out_dir, mask=None):
     rpy = merged[["roll", "pitch", "yaw"]].to_numpy()
     yaw_err = ssa(merged["yaw_post"].to_numpy() - rpy[:, 2])
     rover = merged["rover_tick"].to_numpy().astype(bool)
@@ -90,6 +104,9 @@ def plot_yaw_error(merged, out_dir):
     fig, ax = plt.subplots(figsize=(12, 4))
     ax.plot(t, np.degrees(yaw_err), lw=0.8, label="yaw_post − yaw_truth")
     ax.scatter(t[rover], np.degrees(yaw_err[rover]), s=4, c="r", label="rover tick")
+    if mask is not None and not mask.all():
+        ax.scatter(t[~mask], np.degrees(yaw_err[~mask]), s=4, c="grey",
+                   label="masked (high-rate)", alpha=0.5)
     ax.set_xlabel("t [s]")
     ax.set_ylabel("yaw error [deg]")
     ax.grid(True)
@@ -98,8 +115,14 @@ def plot_yaw_error(merged, out_dir):
     fig.savefig(out_dir / "yaw_error.png", dpi=140)
     plt.close(fig)
 
-    rmse = np.sqrt(np.mean(yaw_err**2))
-    print(f"Yaw RMSE: {np.degrees(rmse):.3f} deg")
+    rmse_all = np.sqrt(np.mean(yaw_err**2))
+    print(f"Yaw RMSE (all):           {np.degrees(rmse_all):.3f} deg  "
+          f"({len(yaw_err)} samples)")
+    if mask is not None and not mask.all():
+        rmse_masked = np.sqrt(np.mean(yaw_err[mask]**2))
+        dropped = (~mask).sum()
+        print(f"Yaw RMSE (between-mvr):   {np.degrees(rmse_masked):.3f} deg  "
+              f"({mask.sum()} samples, {dropped} masked)")
     return yaw_err, t
 
 
@@ -301,16 +324,25 @@ def main():
     ap.add_argument("--lag-ticks", type=int, default=0,
                     help="lag value applied during the run being analysed")
     ap.add_argument("--early-window-s", type=float, default=10.0)
+    ap.add_argument("--yaw-rate-mask-deg-s", type=float, default=100.0,
+                    help="mask samples where |yaw_rate_truth| exceeds this "
+                         "(deg/s) when reporting RMSE / FFT / τ*. 0 disables.")
     args = ap.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     merged, tru = load(args)
 
-    yaw_err, t = plot_yaw_error(merged, args.out_dir)
-    plot_yaw_fft(yaw_err, t, args.out_dir)
+    mask = maneuver_mask(merged, args.yaw_rate_mask_deg_s)
+    if not mask.all():
+        print(f"Maneuver mask: keeping {mask.sum()}/{len(mask)} samples "
+              f"(|yaw_rate| <= {args.yaw_rate_mask_deg_s} deg/s)")
+
+    yaw_err, t = plot_yaw_error(merged, args.out_dir, mask)
+    # FFT and τ* on the masked subset for between-maneuver characterisation.
+    plot_yaw_fft(yaw_err[mask], t[mask], args.out_dir)
     plot_bias(merged, args.out_dir)
-    time_shift_search(merged, tru, args.out_dir)
-    plot_innovation_vs_yaw_rate(merged, args.out_dir)
+    time_shift_search(merged[mask].reset_index(drop=True), tru, args.out_dir)
+    plot_innovation_vs_yaw_rate(merged[mask].reset_index(drop=True), args.out_dir)
     plot_early_window(merged, args.out_dir, args.early_window_s)
     lag_loss_report(args.data, args.lag_ticks)
 

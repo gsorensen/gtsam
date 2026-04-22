@@ -97,6 +97,11 @@ struct Options {
   // Tuning knobs exposed for the zigzag sweep driver.
   double attitude_sigma = 0.05;  // rad, per-axis 2D Unit3 sigma
   int compass_lag_ticks = 0;     // shift z_gnss_comp by N IMU ticks (signed)
+  double noise_scaling = 10.0;   // accel ARW inflation factor (legacy default)
+  double bias_scaling = 50.0;    // gyro ARW + both bias-walk inflation
+  // 1-pole IIR LPF on raw IMU before integrateMeasurement. <=0 disables.
+  double gyro_lpf_hz = 0.0;
+  double accel_lpf_hz = 0.0;
 };
 
 namespace {
@@ -118,6 +123,10 @@ void print_usage(const char* prog) {
       << "                              (default path: <output-dir>/<prefix>debug.csv)\n"
       << "  --attitude-sigma <v>        Unit3 attitude factor sigma [rad] (default 0.05)\n"
       << "  --compass-lag-ticks <n>     shift z_gnss_comp index by n IMU ticks (signed)\n"
+      << "  --noise-scaling <s>         accel ARW inflation (default 10)\n"
+      << "  --bias-scaling <s>          gyro ARW + bias walk inflation (default 50)\n"
+      << "  --gyro-lpf-hz <f>           1-pole IIR cutoff for gyro [Hz], 0 disables\n"
+      << "  --accel-lpf-hz <f>          1-pole IIR cutoff for accel [Hz], 0 disables\n"
       << "  -h, --help\n";
 }
 
@@ -210,6 +219,18 @@ bool parse_args(int argc, char** argv, Options& o) {
     } else if (a == "--compass-lag-ticks") {
       if (!need(i, "--compass-lag-ticks")) return false;
       o.compass_lag_ticks = std::stoi(argv[++i]);
+    } else if (a == "--noise-scaling") {
+      if (!need(i, "--noise-scaling")) return false;
+      o.noise_scaling = std::stod(argv[++i]);
+    } else if (a == "--bias-scaling") {
+      if (!need(i, "--bias-scaling")) return false;
+      o.bias_scaling = std::stod(argv[++i]);
+    } else if (a == "--gyro-lpf-hz") {
+      if (!need(i, "--gyro-lpf-hz")) return false;
+      o.gyro_lpf_hz = std::stod(argv[++i]);
+    } else if (a == "--accel-lpf-hz") {
+      if (!need(i, "--accel-lpf-hz")) return false;
+      o.accel_lpf_hz = std::stod(argv[++i]);
     } else {
       std::cerr << "Unknown arg: " << a << "\n";
       print_usage(argv[0]);
@@ -392,8 +413,8 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
   const double bias_instability_ars = 0.5;   // deg/hour
   const double T_acc = 3600.0;
   const double T_ars = 3600.0;
-  const double noise_scaling = 10;
-  const double bias_scaling = 50.0;
+  const double noise_scaling = opts.noise_scaling;
+  const double bias_scaling = opts.bias_scaling;
 
   const double q_v = std::pow(noise_scaling * vrw / 60.0, 2.0);
   const double q_o = std::pow((bias_scaling * arw / 60.0) * deg2rad(1.0), 2.0);
@@ -607,11 +628,37 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
     }
   }
 
+  // 1-pole IIR LPF state for gyro/accel (initialised to first sample below).
+  // y[n] = (1-alpha) * y[n-1] + alpha * x[n], with alpha = dt / (RC + dt),
+  // RC = 1/(2*pi*fc). dt recomputed per sample (allows non-uniform t).
+  Eigen::Vector3d gyro_lpf_state = d.w_m[0];
+  Eigen::Vector3d accel_lpf_state = d.f_m[0];
+  const bool use_gyro_lpf = opts.gyro_lpf_hz > 0.0;
+  const bool use_accel_lpf = opts.accel_lpf_hz > 0.0;
+  if (use_gyro_lpf || use_accel_lpf) {
+    printf("IMU LPF: gyro=%.1f Hz, accel=%.1f Hz\n",
+           opts.gyro_lpf_hz, opts.accel_lpf_hz);
+  }
+
   for (int64_t idx = 1; idx < N; ++idx) {
     const double dt = d.t[idx] - d.t[idx - 1];
     accumulated_time += dt;
 
-    preintegrated->integrateMeasurement(d.f_m[idx], d.w_m[idx], dt);
+    Eigen::Vector3d w_in = d.w_m[idx];
+    Eigen::Vector3d f_in = d.f_m[idx];
+    if (use_gyro_lpf) {
+      const double rc = 1.0 / (2.0 * M_PI * opts.gyro_lpf_hz);
+      const double a = dt / (rc + dt);
+      gyro_lpf_state = (1.0 - a) * gyro_lpf_state + a * w_in;
+      w_in = gyro_lpf_state;
+    }
+    if (use_accel_lpf) {
+      const double rc = 1.0 / (2.0 * M_PI * opts.accel_lpf_hz);
+      const double a = dt / (rc + dt);
+      accel_lpf_state = (1.0 - a) * accel_lpf_state + a * f_in;
+      f_in = accel_lpf_state;
+    }
+    preintegrated->integrateMeasurement(f_in, w_in, dt);
 
     const bool before_handover = accumulated_time < hcfg.switch_time;
     const bool baro_tick =
