@@ -209,13 +209,17 @@ struct MultirotorData {
   std::vector<Eigen::Vector3d> z_bt_ned;
   std::vector<int> bt_meas_idx;
   std::vector<Eigen::Vector3d> z_gnss_ned;
-  std::vector<int> gnss_meas_idx;
+  std::vector<int> gnss_meas_idx;  // legacy (== MB) -- kept for compat
   std::vector<double> yaw;
   std::vector<int> yaw_idx;
   std::vector<Eigen::Vector3d> z_gnss_comp;  // baseline vector in nav frame
   std::vector<double> z_baro;                // pressure [kPa]
   std::vector<int> baro_idx;
   std::vector<double> z_gnss_range;
+  // IFAC WC 2026: separate MB (position) and rover (baseline/attitude)
+  // measurement indices. Empty when reading a legacy 26-column CSV.
+  std::vector<int> gnss_mb_meas_idx;
+  std::vector<int> gnss_rover_meas_idx;
 };
 
 std::optional<MultirotorData> parse_multirotor_csv(
@@ -233,10 +237,13 @@ std::optional<MultirotorData> parse_multirotor_csv(
     std::string cell;
     std::vector<std::string> tok;
     while (std::getline(ss, cell, ',')) tok.push_back(cell);
-    if (tok.size() != 26) {
-      std::cerr << "Unexpected column count: " << tok.size() << "\n";
+    // 26: legacy, 28: IFAC WC 2026 (adds gnss_mb_meas_idx, gnss_rover_meas_idx)
+    if (tok.size() != 26 && tok.size() != 28) {
+      std::cerr << "Unexpected column count: " << tok.size()
+                << " (expected 26 or 28)\n";
       return std::nullopt;
     }
+    const bool has_split_idx = (tok.size() == 28);
     size_t i = 0;
     d.t.push_back(std::stod(tok[i++]));
     d.f_m.emplace_back(std::stod(tok[i]), std::stod(tok[i + 1]),
@@ -264,6 +271,14 @@ std::optional<MultirotorData> parse_multirotor_csv(
     d.z_baro.push_back(std::stod(tok[i++]));
     d.baro_idx.push_back(std::stoi(tok[i++]));
     d.z_gnss_range.push_back(std::stod(tok[i++]));
+    if (has_split_idx) {
+      d.gnss_mb_meas_idx.push_back(std::stoi(tok[i++]));
+      d.gnss_rover_meas_idx.push_back(std::stoi(tok[i++]));
+    } else {
+      // Legacy CSV: both attitude and position shared gnss_meas_idx.
+      d.gnss_mb_meas_idx.push_back(d.gnss_meas_idx.back());
+      d.gnss_rover_meas_idx.push_back(d.gnss_meas_idx.back());
+    }
   }
 
   return d;
@@ -528,8 +543,15 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
     const bool before_handover = accumulated_time < hcfg.switch_time;
     const bool baro_tick =
         use_baro && d.baro_idx[idx] != 0 && accumulated_time >= 20.0;
+    // IFAC WC 2026: split MB (position/RTK) and rover (baseline/attitude)
+    // gates so the attitude factor only fires on IMU ticks where a rover
+    // compass measurement is actually available. Previously both shared
+    // gnss_meas_idx (== MB), which leaked zero-padded baselines into a
+    // degenerate Unit3 attitude constraint and caused a yaw zigzag.
+    const bool mb_tick = d.gnss_mb_meas_idx[idx] != 0;
+    const bool rover_tick = d.gnss_rover_meas_idx[idx] != 0;
     const bool pre_tick =
-        before_handover && (d.gnss_meas_idx[idx] != 0 || baro_tick);
+        before_handover && (mb_tick || rover_tick || baro_tick);
     const bool post_tick =
         !before_handover && (d.bt_meas_idx[idx] != 0 || baro_tick);
 
@@ -614,7 +636,8 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
 
     // --- Aiding factors ---
     if (pre_tick) {
-      if (d.gnss_meas_idx[idx] != 0) {
+      // GPS position factor -- gated on the MB (RTK) index only.
+      if (mb_tick) {
         if constexpr (UseSE23) {
           graph.add(parnav::GPSFactorSE23(X(correction_count),
                                           d.z_gnss_ned[idx], gnss_noise));
@@ -622,25 +645,20 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
           graph.add(gtsam::GPSFactor(X(correction_count), d.z_gnss_ned[idx],
                                      gnss_noise));
         }
-        // Attitude factor: 2D Unit3 residual on rotation.
-        //
-        // The data-gen script (multirotor_log_validation.m) zero-pads
-        // z_gnss_comp on IMU ticks where the rover NAV_RELPOSNED didn't
-        // match that tick. The CSV has no dedicated rover gating index, so
-        // a zero baseline can leak through on MB-only ticks. Feeding that
-        // to Unit3 divides by zero and injects a degenerate attitude
-        // constraint that manifests as a zigzag in the yaw estimate.
-        // Guard on the baseline norm (body-frame baseline is ~0.5 m).
-        if (d.z_gnss_comp[idx].norm() > 0.1) {
-          const gtsam::Unit3 nZ_meas(d.z_gnss_comp[idx]);
-          const gtsam::Unit3 bRef_body(baseline_body);
-          if constexpr (UseSE23) {
-            graph.add(parnav::ExtendedPoseAttitudeFactor(
-                X(correction_count), nZ_meas, attitude_noise, bRef_body));
-          } else {
-            graph.add(gtsam::Pose3AttitudeFactor(
-                X(correction_count), nZ_meas, attitude_noise, bRef_body));
-          }
+      }
+      // Attitude factor: 2D Unit3 residual -- gated on the rover
+      // (NAV_RELPOSNED baseline) index only. This prevents zero-padded
+      // baselines on MB-only ticks from injecting a degenerate Unit3
+      // constraint (previously caused a yaw zigzag).
+      if (rover_tick) {
+        const gtsam::Unit3 nZ_meas(d.z_gnss_comp[idx]);
+        const gtsam::Unit3 bRef_body(baseline_body);
+        if constexpr (UseSE23) {
+          graph.add(parnav::ExtendedPoseAttitudeFactor(
+              X(correction_count), nZ_meas, attitude_noise, bRef_body));
+        } else {
+          graph.add(gtsam::Pose3AttitudeFactor(
+              X(correction_count), nZ_meas, attitude_noise, bRef_body));
         }
       }
       if (baro_tick) {
