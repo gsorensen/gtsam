@@ -52,8 +52,9 @@
 #include "BaroFactor.hpp"
 #include "CompassFactor.hpp"
 #include "ElevationFactor.hpp"
-#include "GNSSAttFactor.hpp"
+#include "ExtendedPoseAttitudeFactor.hpp"
 #include "GPSFactorSE23.hpp"
+#include <gtsam/navigation/AttitudeFactor.h>
 #include "RangeFactor.hpp"
 #include "utils.hpp"
 
@@ -379,11 +380,10 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
   auto gnss_noise =
       gtsam::noiseModel::Diagonal::Variances(R_GNSS_pos.diagonal());
 
-  gtsam::Vector3 R_compass_diag(std::pow(2.5 / 100, 2.0),
-                                std::pow(2.5 / 100, 2.0),
-                                std::pow(5.0 / 100, 2.0));
-  auto compass_baseline_noise =
-      gtsam::noiseModel::Diagonal::Variances(R_compass_diag);
+  // Attitude factor noise: 2D Unit3 residual, σ=0.05 rad per axis
+  // (matches original SE3 path in parnav_ins_simulator).
+  auto attitude_noise = gtsam::noiseModel::Diagonal::Variances(
+      gtsam::Vector2(0.05 * 0.05, 0.05 * 0.05));
 
   auto yaw_noise = gtsam::noiseModel::Isotropic::Sigma(1, 7.0);
 
@@ -523,6 +523,38 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
     const bool post_tick =
         !before_handover && (d.bt_meas_idx[idx] != 0 || baro_tick);
 
+    // --- Log the preintegration-predicted state every IMU tick ---
+    // This keeps the output arrays aligned with the IMU time vector. At
+    // update ticks we overwrite the last-pushed entry with the smoothed
+    // estimate further down.
+    {
+      gtsam::Rot3 R_pred;
+      Eigen::Vector3d p_pred, v_pred;
+      if constexpr (UseSE23) {
+        gtsam::ExtendedPose3 prop =
+            preintegrated->predict(prev_state, prev_bias);
+        R_pred = prop.rotation();
+        p_pred = prop.position();
+        v_pred = prop.velocity();
+      } else {
+        gtsam::NavState prop = preintegrated->predict(prev_state, prev_bias);
+        R_pred = prop.pose().rotation();
+        p_pred = prop.pose().translation();
+        v_pred = prop.v();
+      }
+      est_R.push_back(R_pred);
+      est_p.push_back(p_pred);
+      est_v.push_back(v_pred);
+      est_ba.push_back(prev_bias.accelerometer());
+      est_bg.push_back(prev_bias.gyroscope());
+      est_baro_bias.push_back(prev_baro_bias);
+      // Between updates we don't recompute marginals; carry the last-known
+      // sigma forward (approx OK for plotting — the update overwrites it).
+      pos_sigma.push_back(pos_sigma.back());
+      vel_sigma.push_back(vel_sigma.back());
+      att_sigma.push_back(att_sigma.back());
+    }
+
     if (!pre_tick && !post_tick) continue;
 
     correction_count++;
@@ -580,9 +612,18 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
           graph.add(gtsam::GPSFactor(X(correction_count), d.z_gnss_ned[idx],
                                      gnss_noise));
         }
-        graph.add(parnav::GNSSAttFactor<PoseParam>(
-            X(correction_count), d.z_gnss_comp[idx], baseline_body,
-            compass_baseline_noise));
+        // Attitude factor: 2D Unit3 residual on rotation.
+        // SE3 uses gtsam::Pose3AttitudeFactor; SE23 uses the ported
+        // parnav::ExtendedPoseAttitudeFactor (same residual semantics).
+        const gtsam::Unit3 nZ_meas(d.z_gnss_comp[idx]);
+        const gtsam::Unit3 bRef_body(baseline_body);
+        if constexpr (UseSE23) {
+          graph.add(parnav::ExtendedPoseAttitudeFactor(
+              X(correction_count), nZ_meas, attitude_noise, bRef_body));
+        } else {
+          graph.add(gtsam::Pose3AttitudeFactor(
+              X(correction_count), nZ_meas, attitude_noise, bRef_body));
+        }
       }
       if (baro_tick) {
         graph.add(parnav::BaroFactor<PoseParam>(X(correction_count),
@@ -638,12 +679,13 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
 
     preintegrated->resetIntegrationAndSetBias(prev_bias);
 
-    est_R.push_back(R_est);
-    est_p.push_back(p_est);
-    est_v.push_back(v_est);
-    est_ba.push_back(prev_bias.accelerometer());
-    est_bg.push_back(prev_bias.gyroscope());
-    est_baro_bias.push_back(prev_baro_bias);
+    // Overwrite the last-logged (predicted) entry with the smoothed estimate.
+    est_R.back() = R_est;
+    est_p.back() = p_est;
+    est_v.back() = v_est;
+    est_ba.back() = prev_bias.accelerometer();
+    est_bg.back() = prev_bias.gyroscope();
+    est_baro_bias.back() = prev_baro_bias;
 
     // Marginal sigmas
     Eigen::Vector3d sp = Eigen::Vector3d::Zero();
@@ -665,9 +707,9 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
     } catch (const std::exception&) {
       // fall through with zeros
     }
-    pos_sigma.push_back(sp);
-    vel_sigma.push_back(sv);
-    att_sigma.push_back(sa);
+    pos_sigma.back() = sp;
+    vel_sigma.back() = sv;
+    att_sigma.back() = sa;
 
     if (correction_count % 100 == 0) {
       printf("step %lld  t=%.2f  p=[%.2f %.2f %.2f]\n",
