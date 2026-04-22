@@ -623,16 +623,24 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
                                      gnss_noise));
         }
         // Attitude factor: 2D Unit3 residual on rotation.
-        // SE3 uses gtsam::Pose3AttitudeFactor; SE23 uses the ported
-        // parnav::ExtendedPoseAttitudeFactor (same residual semantics).
-        const gtsam::Unit3 nZ_meas(d.z_gnss_comp[idx]);
-        const gtsam::Unit3 bRef_body(baseline_body);
-        if constexpr (UseSE23) {
-          graph.add(parnav::ExtendedPoseAttitudeFactor(
-              X(correction_count), nZ_meas, attitude_noise, bRef_body));
-        } else {
-          graph.add(gtsam::Pose3AttitudeFactor(X(correction_count), nZ_meas,
-                                               attitude_noise, bRef_body));
+        //
+        // The data-gen script (multirotor_log_validation.m) zero-pads
+        // z_gnss_comp on IMU ticks where the rover NAV_RELPOSNED didn't
+        // match that tick. The CSV has no dedicated rover gating index, so
+        // a zero baseline can leak through on MB-only ticks. Feeding that
+        // to Unit3 divides by zero and injects a degenerate attitude
+        // constraint that manifests as a zigzag in the yaw estimate.
+        // Guard on the baseline norm (body-frame baseline is ~0.5 m).
+        if (d.z_gnss_comp[idx].norm() > 0.1) {
+          const gtsam::Unit3 nZ_meas(d.z_gnss_comp[idx]);
+          const gtsam::Unit3 bRef_body(baseline_body);
+          if constexpr (UseSE23) {
+            graph.add(parnav::ExtendedPoseAttitudeFactor(
+                X(correction_count), nZ_meas, attitude_noise, bRef_body));
+          } else {
+            graph.add(gtsam::Pose3AttitudeFactor(
+                X(correction_count), nZ_meas, attitude_noise, bRef_body));
+          }
         }
       }
       if (baro_tick) {
