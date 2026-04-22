@@ -227,14 +227,80 @@ def plot_innovation_vs_yaw_rate(merged, out_dir):
           "(|>0.3| => likely timing/latency bug)")
 
 
+def plot_early_window(merged, out_dir, window_s=10.0):
+    """Zoom on the first `window_s` seconds of the debug log.
+
+    Overlays propagated and smoothed yaw plus truth yaw, with rover ticks
+    marked. Useful for diagnosing early-convergence problems introduced
+    by, e.g., compass-lag re-timing that drops the first rover samples.
+    """
+    t0 = merged["t"].iloc[0]
+    mask = merged["t"] <= t0 + window_s
+    m = merged[mask]
+    if len(m) < 2:
+        return
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(m.t, np.degrees(np.unwrap(m.yaw)),      label="yaw_truth", lw=1.2)
+    ax.plot(m.t, np.degrees(np.unwrap(m.yaw_prop)), label="yaw_prop (propagated)", lw=0.8)
+    ax.plot(m.t, np.degrees(np.unwrap(m.yaw_post)), label="yaw_post (smoothed)", lw=0.8)
+    rover = m.rover_tick.to_numpy().astype(bool)
+    if rover.any():
+        ax.scatter(m.t[rover], np.degrees(m.yaw_post[rover]),
+                   s=8, c="r", label="rover tick", zorder=3)
+    ax.set_xlabel("t [s]")
+    ax.set_ylabel("yaw [deg]")
+    ax.set_title(f"Early-window zoom (first {window_s:.0f} s)")
+    ax.grid(True); ax.legend()
+    fig.tight_layout()
+    fig.savefig(out_dir / "yaw_early_window.png", dpi=140)
+    plt.close(fig)
+
+
+def lag_loss_report(data_csv, lag_ticks):
+    """Count rover ticks lost to a given --compass-lag-ticks value.
+
+    Reads the raw df_flat_data.csv (which has gnss_rover_meas_idx). With
+    shifted[i] = original[i - lag], samples whose i-lag is out of [0,N-1]
+    are dropped. For positive lag: the first `lag` samples of the shifted
+    column are zero; any rover firings in original[i] with i in [N-lag,N)
+    fall off the end.
+    """
+    if not data_csv.exists():
+        print(f"lag-loss: data CSV not found at {data_csv}, skipping")
+        return
+    df = pd.read_csv(data_csv, usecols=["gnss_rover_meas_idx"])
+    rover = (df["gnss_rover_meas_idx"].to_numpy() != 0)
+    N = len(rover)
+    total = int(rover.sum())
+    if lag_ticks > 0:
+        # original[i] with i >= N - lag falls off.
+        lost = int(rover[N - lag_ticks:].sum()) if lag_ticks < N else total
+        head_gap = lag_ticks
+        print(f"lag-loss: lag=+{lag_ticks} ticks => {lost}/{total} rover ticks "
+              f"lost from tail; first {head_gap} ticks of shifted column are 0")
+    elif lag_ticks < 0:
+        lag = -lag_ticks
+        lost = int(rover[:lag].sum()) if lag < N else total
+        print(f"lag-loss: lag={lag_ticks} ticks => {lost}/{total} rover ticks "
+              f"lost from head; last {lag} ticks of shifted column are 0")
+    else:
+        print("lag-loss: lag=0, no samples dropped")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--debug", type=Path,
                     default=DEFAULT_DIR / "ifac_wc_2026_se3_cb_none_none_debug.csv")
     ap.add_argument("--truth", type=Path,
                     default=DEFAULT_DIR / "df_flat_truth.csv")
+    ap.add_argument("--data", type=Path,
+                    default=DEFAULT_DIR / "df_flat_data.csv",
+                    help="raw CSV — used for the lag-loss report")
     ap.add_argument("--out-dir", type=Path,
                     default=DEFAULT_DIR / "yaw_zigzag_analysis")
+    ap.add_argument("--lag-ticks", type=int, default=0,
+                    help="lag value applied during the run being analysed")
+    ap.add_argument("--early-window-s", type=float, default=10.0)
     args = ap.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -245,6 +311,8 @@ def main():
     plot_bias(merged, args.out_dir)
     time_shift_search(merged, tru, args.out_dir)
     plot_innovation_vs_yaw_rate(merged, args.out_dir)
+    plot_early_window(merged, args.out_dir, args.early_window_s)
+    lag_loss_report(args.data, args.lag_ticks)
 
     print(f"\nPlots written to {args.out_dir}")
 
