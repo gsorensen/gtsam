@@ -149,6 +149,7 @@ def main():
     out = args.out or (prefix.parent / f"{prefix.name}3sigma_truth.png")
     fig.savefig(out, dpi=150)
     print(f"Saved {out}")
+    plt.show()
 
     # RMSE summary.
     print("\nRMSE:")
