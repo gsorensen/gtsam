@@ -420,6 +420,10 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
   const double A_pos = 2.5;
   const double A_vel = 0.5;
   const double A_att = 0.15;
+  // Per-axis prior overrides for yaw and altitude (match original P0 layout
+  // in multirotor_test.cpp: P0(2,2)=0.25^2 and P0(5,5)=5^2).
+  const double A_yaw = 0.25;
+  const double A_pos_z = 5.0;
   const double A_acc_bias = (50.0 * g0 / 1000.0);
   const double A_gyro_bias = deg2rad(360.0 / 3600.0);
   const double A_baro_bias = 1.0;
@@ -450,8 +454,8 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
 
   if constexpr (UseSE23) {
     auto ep_noise = gtsam::noiseModel::Diagonal::Sigmas(
-        (gtsam::Vector(9) << A_att, A_att, A_att, A_vel, A_vel, A_vel, A_pos,
-         A_pos, A_pos)
+        (gtsam::Vector(9) << A_att, A_att, A_yaw, A_vel, A_vel, A_vel, A_pos,
+         A_pos, A_pos_z)
             .finished());
     gtsam::ExtendedPose3 ext0(R0, v0, p0);
     graph.addPrior<gtsam::ExtendedPose3>(X(0), ext0, ep_noise);
@@ -459,7 +463,7 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
     timestamps[X(0)] = 0.0;
   } else {
     auto pose_noise = gtsam::noiseModel::Diagonal::Sigmas(
-        (gtsam::Vector(6) << A_att, A_att, A_att, A_pos, A_pos, A_pos)
+        (gtsam::Vector(6) << A_att, A_att, A_yaw, A_pos, A_pos, A_pos_z)
             .finished());
     auto vel_noise = gtsam::noiseModel::Isotropic::Sigma(3, A_vel);
     graph.addPrior<gtsam::Pose3>(X(0), gtsam::Pose3(R0, p0), pose_noise);
