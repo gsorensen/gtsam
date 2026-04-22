@@ -250,6 +250,121 @@ def plot_innovation_vs_yaw_rate(merged, out_dir):
           "(|>0.3| => likely timing/latency bug)")
 
 
+def plot_structural_diagnostics(merged, out_dir, mask=None):
+    """Separate structural error sources from filter tuning.
+
+    (1) Gyro scale-factor error:
+        yaw_err vs cumulative |truth_yaw_rate|*dt. A linear slope means a
+        fraction of every degree of yaw motion is mistracked -- constant
+        gyro bias can't absorb it.
+    (2) Axis misalignment:
+        corr(yaw_err, truth_roll_rate) and corr(yaw_err, truth_pitch_rate).
+        Nonzero => gyro X/Y axes bleed into Z.
+    (3) Compass baseline geometry:
+        mean yaw_err over low-rate samples (static offset) and stddev of
+        |baseline_body|. A non-zero mean means a yaw-offset lever-arm
+        miscalibration; a large relative stddev means lever-arm length
+        itself is wrong.
+    """
+    if mask is None:
+        mask = np.ones(len(merged), dtype=bool)
+    m = merged.loc[mask].reset_index(drop=True)
+    if len(m) < 10:
+        print("structural diagnostics: not enough masked samples, skipping")
+        return
+
+    t = m["t"].to_numpy()
+    rpy = m[["roll", "pitch", "yaw"]].to_numpy()
+    roll_rate = np.gradient(np.unwrap(rpy[:, 0]), t)
+    pitch_rate = np.gradient(np.unwrap(rpy[:, 1]), t)
+    yaw_rate = np.gradient(np.unwrap(rpy[:, 2]), t)
+    yaw_err = ssa(m["yaw_post"].to_numpy() - rpy[:, 2])
+
+    # (1) Scale factor: yaw_err vs cumulative |yaw-rate|*dt (total yaw path).
+    dt = np.gradient(t)
+    cum_yaw = np.cumsum(np.abs(yaw_rate) * dt)
+    # Robust slope: linear fit yaw_err = k * cum_yaw + c.
+    A = np.vstack([cum_yaw, np.ones_like(cum_yaw)]).T
+    k, c = np.linalg.lstsq(A, yaw_err, rcond=None)[0]
+    sf_ppm = k * 1e6  # rad per rad of path = ppm of scale error
+    print(f"structural (1) gyro scale factor: slope = {sf_ppm:.0f} ppm "
+          f"(yaw_err per rad of cumulative |yaw-rate|)")
+
+    # (2) Axis misalignment: correlations.
+    def corr(a, b):
+        a = a - a.mean(); b = b - b.mean()
+        s = np.sqrt((a * a).sum() * (b * b).sum())
+        return float((a * b).sum() / s) if s > 0 else 0.0
+    c_rr = corr(roll_rate, yaw_err)
+    c_pr = corr(pitch_rate, yaw_err)
+    # Least-squares decomposition: yaw_err ~ a*roll_rate + b*pitch_rate + c.
+    X = np.vstack([roll_rate, pitch_rate, np.ones_like(yaw_err)]).T
+    coefs, *_ = np.linalg.lstsq(X, yaw_err, rcond=None)
+    print(f"structural (2) axis misalignment: "
+          f"corr(roll_rate, yaw_err)={c_rr:+.3f}  "
+          f"corr(pitch_rate, yaw_err)={c_pr:+.3f}")
+    print(f"                                 "
+          f"yaw_err ~ {coefs[0]:+.4f}*roll_rate {coefs[1]:+.4f}*pitch_rate "
+          f"+ {coefs[2]:+.4e}  (coef [rad per rad/s])")
+
+    # (3) Compass baseline geometry.
+    bb = merged[["baseline_body_x", "baseline_body_y", "baseline_body_z"]].to_numpy()
+    bb_norm = np.linalg.norm(bb, axis=1)
+    bb_norm = bb_norm[bb_norm > 1e-9]
+    mean_bb = bb_norm.mean() if len(bb_norm) else 0.0
+    std_bb = bb_norm.std() if len(bb_norm) else 0.0
+    # Static subset: very low yaw-rate.
+    static = np.abs(yaw_rate) < np.deg2rad(5.0)
+    if static.sum() > 5:
+        offset = np.degrees(yaw_err[static].mean())
+        print(f"structural (3) compass baseline: |bb|={mean_bb:.4f} m "
+              f"(std {std_bb:.2e}, {std_bb/mean_bb*100 if mean_bb>0 else 0:.2f}%)  "
+              f"static yaw offset = {offset:+.3f} deg "
+              f"({static.sum()} samples, |yaw_rate|<5 deg/s)")
+    else:
+        print(f"structural (3) compass baseline: |bb|={mean_bb:.4f} m "
+              f"(std {std_bb:.2e}); not enough low-rate samples for offset")
+
+    # Plots.
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+
+    ax = axes[0, 0]
+    ax.scatter(cum_yaw, np.degrees(yaw_err), s=3, alpha=0.4)
+    xs = np.array([cum_yaw.min(), cum_yaw.max()])
+    ax.plot(xs, np.degrees(k * xs + c), "r-", lw=1,
+            label=f"slope = {sf_ppm:.0f} ppm")
+    ax.set_xlabel("cumulative |yaw-rate|·dt [rad]")
+    ax.set_ylabel("yaw error [deg]")
+    ax.set_title("(1) Gyro scale factor")
+    ax.grid(True); ax.legend()
+
+    ax = axes[0, 1]
+    ax.scatter(np.degrees(roll_rate), np.degrees(yaw_err), s=3, alpha=0.4)
+    ax.set_xlabel("truth roll rate [deg/s]")
+    ax.set_ylabel("yaw error [deg]")
+    ax.set_title(f"(2a) Roll→Yaw  corr={c_rr:+.3f}")
+    ax.grid(True)
+
+    ax = axes[1, 0]
+    ax.scatter(np.degrees(pitch_rate), np.degrees(yaw_err), s=3, alpha=0.4)
+    ax.set_xlabel("truth pitch rate [deg/s]")
+    ax.set_ylabel("yaw error [deg]")
+    ax.set_title(f"(2b) Pitch→Yaw  corr={c_pr:+.3f}")
+    ax.grid(True)
+
+    ax = axes[1, 1]
+    ax.plot(merged.t, bb_norm if len(bb_norm) == len(merged)
+            else np.linalg.norm(bb, axis=1), lw=0.6)
+    ax.set_xlabel("t [s]")
+    ax.set_ylabel("|baseline_body| [m]")
+    ax.set_title("(3) Baseline length sanity")
+    ax.grid(True)
+
+    fig.tight_layout()
+    fig.savefig(out_dir / "structural_diagnostics.png", dpi=140)
+    plt.close(fig)
+
+
 def plot_early_window(merged, out_dir, window_s=10.0):
     """Zoom on the first `window_s` seconds of the debug log.
 
@@ -343,6 +458,7 @@ def main():
     plot_bias(merged, args.out_dir)
     time_shift_search(merged[mask].reset_index(drop=True), tru, args.out_dir)
     plot_innovation_vs_yaw_rate(merged[mask].reset_index(drop=True), args.out_dir)
+    plot_structural_diagnostics(merged, args.out_dir, mask)
     plot_early_window(merged, args.out_dir, args.early_window_s)
     lag_loss_report(args.data, args.lag_ticks)
 
