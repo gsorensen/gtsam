@@ -24,6 +24,7 @@
 #include <gtsam/geometry/Unit3.h>
 #include <gtsam/inference/Symbol.h>
 #include <gtsam/linear/NoiseModel.h>
+#include <gtsam/navigation/AttitudeFactor.h>
 #include <gtsam/navigation/CombinedImuFactor.h>
 #include <gtsam/navigation/CombinedImuFactor2.h>
 #include <gtsam/navigation/GPSFactor.h>
@@ -54,7 +55,6 @@
 #include "ElevationFactor.hpp"
 #include "ExtendedPoseAttitudeFactor.hpp"
 #include "GPSFactorSE23.hpp"
-#include <gtsam/navigation/AttitudeFactor.h>
 #include "RangeFactor.hpp"
 #include "utils.hpp"
 
@@ -265,6 +265,7 @@ std::optional<MultirotorData> parse_multirotor_csv(
     d.baro_idx.push_back(std::stoi(tok[i++]));
     d.z_gnss_range.push_back(std::stod(tok[i++]));
   }
+
   return d;
 }
 
@@ -401,10 +402,15 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
       wrap_robust(pars_range_base, opts.robust, opts.robust_threshold);
 
   // --- PARS geometry (fixed constants from original program) ---
+  //  Eigen::Matrix3d R_rn;
+  //  R_rn << -0.0369, 0.1402, -0.9894, -0.0456, -0.9893, -0.1384, -0.9983,
+  //  0.0401,
+  //      0.0429;
+  //  Eigen::Vector3d pars_origin(-0.0519, -0.0820, 0.0492);
   Eigen::Matrix3d R_rn;
-  R_rn << -0.0369, 0.1402, -0.9894, -0.0456, -0.9893, -0.1384, -0.9983, 0.0401,
-      0.0429;
-  Eigen::Vector3d pars_origin(-0.0519, -0.0820, 0.0492);
+  R_rn << 0.0297, -0.0824, -0.9962, -0.0379, -0.9960, 0.0813, -0.9988, 0.0353,
+      -0.0327;
+  Eigen::Vector3d pars_origin(0.0601, 0.1740, 0.0436);
 
   // --- Compass / baseline geometry ---
   const gtsam::Point3 p_imu_rover_b(0.153, -0.019, -0.302);
@@ -625,8 +631,8 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
           graph.add(parnav::ExtendedPoseAttitudeFactor(
               X(correction_count), nZ_meas, attitude_noise, bRef_body));
         } else {
-          graph.add(gtsam::Pose3AttitudeFactor(
-              X(correction_count), nZ_meas, attitude_noise, bRef_body));
+          graph.add(gtsam::Pose3AttitudeFactor(X(correction_count), nZ_meas,
+                                               attitude_noise, bRef_body));
         }
       }
       if (baro_tick) {
@@ -639,6 +645,12 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
         const double azi = d.z_bt[idx](0);
         const double ele = d.z_bt[idx](1);
         const double range = d.z_bt[idx](2);
+
+        // std::cout << "Azi " << azi << "\n";
+        // std::cout << "Ele " << ele << "\n";
+        // std::cout << "Ran " << range << "\n";
+        // std::cin.get();
+
         graph.add(parnav::AzimuthFactor<PoseParam>(
             X(correction_count), pars_azi_noise, azi, -pars_origin, R_rn));
         graph.add(parnav::ElevationFactor<PoseParam>(
