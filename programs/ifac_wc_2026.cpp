@@ -562,6 +562,30 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
   const auto N = static_cast<int64_t>(d.t.size());
 
   // --- Debug log (per-update CSV for yaw-zigzag analysis) ---
+  // Apply compass_lag_ticks by re-timing the entire rover column in place:
+  // both the gating index and the baseline value shift together. A negative
+  // lag moves the rover measurement earlier on the IMU time axis (pipeline
+  // delay compensation). This avoids pulling from zero-padded rows that
+  // would result from shifting only the value.
+  std::vector<int> rover_idx_shifted = d.gnss_rover_meas_idx;
+  std::vector<Eigen::Vector3d> z_gnss_comp_shifted = d.z_gnss_comp;
+  if (opts.compass_lag_ticks != 0) {
+    const int64_t lag = opts.compass_lag_ticks;
+    std::fill(rover_idx_shifted.begin(), rover_idx_shifted.end(), 0);
+    std::fill(z_gnss_comp_shifted.begin(), z_gnss_comp_shifted.end(),
+              Eigen::Vector3d::Zero());
+    // shifted[i] := original[i - lag] (guarded)
+    for (int64_t i = 0; i < N; ++i) {
+      const int64_t j = i - lag;
+      if (j >= 0 && j < N) {
+        rover_idx_shifted[i] = d.gnss_rover_meas_idx[j];
+        z_gnss_comp_shifted[i] = d.z_gnss_comp[j];
+      }
+    }
+    printf("Compass lag: %+lld IMU ticks applied\n",
+           static_cast<long long>(lag));
+  }
+
   std::ofstream debug_ofs;
   if (opts.debug_log) {
     std::string path = opts.debug_log_file.empty()
@@ -598,7 +622,7 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
     // gnss_meas_idx (== MB), which leaked zero-padded baselines into a
     // degenerate Unit3 attitude constraint and caused a yaw zigzag.
     const bool mb_tick = d.gnss_mb_meas_idx[idx] != 0;
-    const bool rover_tick = d.gnss_rover_meas_idx[idx] != 0;
+    const bool rover_tick = rover_idx_shifted[idx] != 0;
     const bool pre_tick =
         before_handover && (mb_tick || rover_tick || baro_tick);
     const bool post_tick =
@@ -703,9 +727,7 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
       // baselines on MB-only ticks from injecting a degenerate Unit3
       // constraint (previously caused a yaw zigzag).
       if (rover_tick) {
-        const int64_t lag_idx = std::clamp<int64_t>(
-            idx + opts.compass_lag_ticks, 0, N - 1);
-        const gtsam::Unit3 nZ_meas(d.z_gnss_comp[lag_idx]);
+        const gtsam::Unit3 nZ_meas(z_gnss_comp_shifted[idx]);
         const gtsam::Unit3 bRef_body(baseline_body);
         if constexpr (UseSE23) {
           graph.add(parnav::ExtendedPoseAttitudeFactor(
@@ -826,9 +848,7 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
       Eigen::Vector3d nPred = Eigen::Vector3d::Constant(
           std::numeric_limits<double>::quiet_NaN());
       if (rover_tick && before_handover) {
-        const int64_t lag_idx = std::clamp<int64_t>(
-            idx + opts.compass_lag_ticks, 0, N - 1);
-        const gtsam::Unit3 nZ_meas(d.z_gnss_comp[lag_idx]);
+        const gtsam::Unit3 nZ_meas(z_gnss_comp_shifted[idx]);
         nPred = R_prop.matrix() * baseline_body.normalized();
         const gtsam::Unit3 nPred_u(nPred);
         const gtsam::Vector2 e = nZ_meas.errorVector(nPred_u);
@@ -839,7 +859,9 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
 
       const auto& bg = prev_bias.gyroscope();
       const auto& ba = prev_bias.accelerometer();
-      const auto& zc = d.z_gnss_comp[idx];
+      // Log the *shifted* baseline so z_gnss_comp matches what the factor
+      // actually consumed (identical to d.z_gnss_comp when lag==0).
+      const auto& zc = z_gnss_comp_shifted[idx];
 
       debug_ofs << t_now << ',' << correction_count << ',' << idx << ','
                 << (mb_tick ? 1 : 0) << ',' << (rover_tick ? 1 : 0) << ','
