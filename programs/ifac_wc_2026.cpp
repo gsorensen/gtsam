@@ -102,6 +102,8 @@ struct Options {
   // 1-pole IIR LPF on raw IMU before integrateMeasurement. <=0 disables.
   double gyro_lpf_hz = 0.0;
   double accel_lpf_hz = 0.0;
+  // Rz(theta) applied to baseline_body to correct rover-antenna yaw miscal.
+  double baseline_yaw_offset_deg = 0.0;
 };
 
 namespace {
@@ -127,6 +129,8 @@ void print_usage(const char* prog) {
       << "  --bias-scaling <s>          gyro ARW + bias walk inflation (default 50)\n"
       << "  --gyro-lpf-hz <f>           1-pole IIR cutoff for gyro [Hz], 0 disables\n"
       << "  --accel-lpf-hz <f>          1-pole IIR cutoff for accel [Hz], 0 disables\n"
+      << "  --baseline-yaw-offset-deg <d> Rz rotation of baseline_body to correct\n"
+      << "                              rover-antenna yaw miscalibration (default 0)\n"
       << "  -h, --help\n";
 }
 
@@ -231,6 +235,9 @@ bool parse_args(int argc, char** argv, Options& o) {
     } else if (a == "--accel-lpf-hz") {
       if (!need(i, "--accel-lpf-hz")) return false;
       o.accel_lpf_hz = std::stod(argv[++i]);
+    } else if (a == "--baseline-yaw-offset-deg") {
+      if (!need(i, "--baseline-yaw-offset-deg")) return false;
+      o.baseline_yaw_offset_deg = std::stod(argv[++i]);
     } else {
       std::cerr << "Unknown arg: " << a << "\n";
       print_usage(argv[0]);
@@ -478,7 +485,13 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
   // --- Compass / baseline geometry ---
   const gtsam::Point3 p_imu_rover_b(0.153, -0.019, -0.302);
   const gtsam::Point3 p_imu_bm_b(-0.310, 0.156, -0.300);
-  const gtsam::Point3 baseline_body = p_imu_rover_b - p_imu_bm_b;
+  gtsam::Point3 baseline_body = p_imu_rover_b - p_imu_bm_b;
+  if (opts.baseline_yaw_offset_deg != 0.0) {
+    const double th = opts.baseline_yaw_offset_deg * M_PI / 180.0;
+    baseline_body = gtsam::Rot3::Rz(th).rotate(baseline_body);
+    std::fprintf(stderr, "Applied baseline yaw offset: %.3f deg\n",
+                 opts.baseline_yaw_offset_deg);
+  }
 
   // --- Initial state (from original program) ---
   gtsam::Rot3 R0 =
