@@ -39,6 +39,7 @@
 #include <gtsam/slam/BetweenFactor.h>
 
 #include <Eigen/Core>
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <fstream>
@@ -87,6 +88,15 @@ struct Options {
   std::string output_dir =
       "/Users/ghms/ws/ntnu/parnav/parnav-scripts/post_processing/";
   std::string output_prefix = "ifac_wc_2026_";
+
+  // Debug logging: per-update CSV with innovations, predicted & smoothed yaw,
+  // bias estimates, and rover/MB flags. Off by default.
+  bool debug_log = false;
+  std::string debug_log_file;  // auto-filled if empty
+
+  // Tuning knobs exposed for the zigzag sweep driver.
+  double attitude_sigma = 0.05;  // rad, per-axis 2D Unit3 sigma
+  int compass_lag_ticks = 0;     // shift z_gnss_comp by N IMU ticks (signed)
 };
 
 namespace {
@@ -104,6 +114,10 @@ void print_usage(const char* prog) {
       << "  --input <path>\n"
       << "  --output-dir <path>\n"
       << "  --output-prefix <str>\n"
+      << "  --debug-log [path]          emit per-update debug CSV\n"
+      << "                              (default path: <output-dir>/<prefix>debug.csv)\n"
+      << "  --attitude-sigma <v>        Unit3 attitude factor sigma [rad] (default 0.05)\n"
+      << "  --compass-lag-ticks <n>     shift z_gnss_comp index by n IMU ticks (signed)\n"
       << "  -h, --help\n";
 }
 
@@ -184,6 +198,18 @@ bool parse_args(int argc, char** argv, Options& o) {
     } else if (a == "--output-prefix") {
       if (!need(i, "--output-prefix")) return false;
       o.output_prefix = argv[++i];
+    } else if (a == "--debug-log") {
+      o.debug_log = true;
+      // Optional path argument: accept it only if the next token isn't a flag.
+      if (i + 1 < argc && argv[i + 1][0] != '-') {
+        o.debug_log_file = argv[++i];
+      }
+    } else if (a == "--attitude-sigma") {
+      if (!need(i, "--attitude-sigma")) return false;
+      o.attitude_sigma = std::stod(argv[++i]);
+    } else if (a == "--compass-lag-ticks") {
+      if (!need(i, "--compass-lag-ticks")) return false;
+      o.compass_lag_ticks = std::stoi(argv[++i]);
     } else {
       std::cerr << "Unknown arg: " << a << "\n";
       print_usage(argv[0]);
@@ -396,10 +422,11 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
   auto gnss_noise =
       gtsam::noiseModel::Diagonal::Variances(R_GNSS_pos.diagonal());
 
-  // Attitude factor noise: 2D Unit3 residual, σ=0.05 rad per axis
-  // (matches original SE3 path in parnav_ins_simulator).
+  // Attitude factor noise: 2D Unit3 residual, σ exposed via --attitude-sigma
+  // (default 0.05 rad per axis, matching original SE3 path).
+  const double att_s = opts.attitude_sigma;
   auto attitude_noise = gtsam::noiseModel::Diagonal::Variances(
-      gtsam::Vector2(0.05 * 0.05, 0.05 * 0.05));
+      gtsam::Vector2(att_s * att_s, att_s * att_s));
 
   auto yaw_noise = gtsam::noiseModel::Isotropic::Sigma(1, 7.0);
 
@@ -534,6 +561,28 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
   const auto start = std::chrono::system_clock::now();
   const auto N = static_cast<int64_t>(d.t.size());
 
+  // --- Debug log (per-update CSV for yaw-zigzag analysis) ---
+  std::ofstream debug_ofs;
+  if (opts.debug_log) {
+    std::string path = opts.debug_log_file.empty()
+                           ? (opts.output_dir + opts.output_prefix + "debug.csv")
+                           : opts.debug_log_file;
+    debug_ofs.open(path);
+    if (!debug_ofs) {
+      std::cerr << "Warning: could not open debug log " << path << "\n";
+    } else {
+      debug_ofs
+          << "t,correction_idx,idx,mb_tick,rover_tick,baro_tick,before_handover,"
+          << "yaw_prop,yaw_post,pitch_prop,pitch_post,roll_prop,roll_post,"
+          << "att_innov_u,att_innov_v,att_innov_norm,"
+          << "z_gnss_comp_x,z_gnss_comp_y,z_gnss_comp_z,"
+          << "nPred_x,nPred_y,nPred_z,"
+          << "bg_x,bg_y,bg_z,ba_x,ba_y,ba_z,"
+          << "baseline_body_x,baseline_body_y,baseline_body_z\n";
+      printf("Debug log: %s\n", path.c_str());
+    }
+  }
+
   for (int64_t idx = 1; idx < N; ++idx) {
     const double dt = d.t[idx] - d.t[idx - 1];
     accumulated_time += dt;
@@ -609,14 +658,17 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
     }
 
     // --- Predict and insert initial values ---
+    gtsam::Rot3 R_prop;  // kept for debug log
     if constexpr (UseSE23) {
       gtsam::ExtendedPose3 prop = preintegrated->predict(prev_state, prev_bias);
+      R_prop = prop.rotation();
       values.insert(X(correction_count), prop);
       values.insert(B(correction_count), prev_bias);
       timestamps[X(correction_count)] = t_now;
       timestamps[B(correction_count)] = t_now;
     } else {
       gtsam::NavState prop = preintegrated->predict(prev_state, prev_bias);
+      R_prop = prop.pose().rotation();
       values.insert(X(correction_count), prop.pose());
       values.insert(V(correction_count), prop.v());
       values.insert(B(correction_count), prev_bias);
@@ -651,7 +703,9 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
       // baselines on MB-only ticks from injecting a degenerate Unit3
       // constraint (previously caused a yaw zigzag).
       if (rover_tick) {
-        const gtsam::Unit3 nZ_meas(d.z_gnss_comp[idx]);
+        const int64_t lag_idx = std::clamp<int64_t>(
+            idx + opts.compass_lag_ticks, 0, N - 1);
+        const gtsam::Unit3 nZ_meas(d.z_gnss_comp[lag_idx]);
         const gtsam::Unit3 bRef_body(baseline_body);
         if constexpr (UseSE23) {
           graph.add(parnav::ExtendedPoseAttitudeFactor(
@@ -752,6 +806,53 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
     pos_sigma.back() = sp;
     vel_sigma.back() = sv;
     att_sigma.back() = sa;
+
+    // --- Debug log row ---
+    if (debug_ofs.is_open()) {
+      // Propagated attitude (before smoother) and smoothed attitude.
+      const double yaw_prop = R_prop.yaw();
+      const double pitch_prop = R_prop.pitch();
+      const double roll_prop = R_prop.roll();
+      const double yaw_post = R_est.yaw();
+      const double pitch_post = R_est.pitch();
+      const double roll_post = R_est.roll();
+
+      // Attitude innovation (2D Unit3 error) at rover ticks only. Computed
+      // from the *propagated* rotation so it reflects what the factor saw
+      // before the update.
+      double inn_u = std::numeric_limits<double>::quiet_NaN();
+      double inn_v = std::numeric_limits<double>::quiet_NaN();
+      double inn_n = std::numeric_limits<double>::quiet_NaN();
+      Eigen::Vector3d nPred = Eigen::Vector3d::Constant(
+          std::numeric_limits<double>::quiet_NaN());
+      if (rover_tick && before_handover) {
+        const int64_t lag_idx = std::clamp<int64_t>(
+            idx + opts.compass_lag_ticks, 0, N - 1);
+        const gtsam::Unit3 nZ_meas(d.z_gnss_comp[lag_idx]);
+        nPred = R_prop.matrix() * baseline_body.normalized();
+        const gtsam::Unit3 nPred_u(nPred);
+        const gtsam::Vector2 e = nZ_meas.errorVector(nPred_u);
+        inn_u = e(0);
+        inn_v = e(1);
+        inn_n = e.norm();
+      }
+
+      const auto& bg = prev_bias.gyroscope();
+      const auto& ba = prev_bias.accelerometer();
+      const auto& zc = d.z_gnss_comp[idx];
+
+      debug_ofs << t_now << ',' << correction_count << ',' << idx << ','
+                << (mb_tick ? 1 : 0) << ',' << (rover_tick ? 1 : 0) << ','
+                << (baro_tick ? 1 : 0) << ',' << (before_handover ? 1 : 0)
+                << ',' << yaw_prop << ',' << yaw_post << ',' << pitch_prop
+                << ',' << pitch_post << ',' << roll_prop << ',' << roll_post
+                << ',' << inn_u << ',' << inn_v << ',' << inn_n << ','
+                << zc.x() << ',' << zc.y() << ',' << zc.z() << ',' << nPred.x()
+                << ',' << nPred.y() << ',' << nPred.z() << ',' << bg.x() << ','
+                << bg.y() << ',' << bg.z() << ',' << ba.x() << ',' << ba.y()
+                << ',' << ba.z() << ',' << baseline_body.x() << ','
+                << baseline_body.y() << ',' << baseline_body.z() << '\n';
+    }
 
     if (correction_count % 100 == 0) {
       printf("step %lld  t=%.2f  p=[%.2f %.2f %.2f]\n",
