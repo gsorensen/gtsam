@@ -97,8 +97,8 @@ struct Options {
   // Tuning knobs exposed for the zigzag sweep driver.
   double attitude_sigma = 0.05;  // rad, per-axis 2D Unit3 sigma
   int compass_lag_ticks = 0;     // shift z_gnss_comp by N IMU ticks (signed)
-  double noise_scaling = 10.0;   // accel ARW inflation factor (legacy default)
-  double bias_scaling = 50.0;    // gyro ARW + both bias-walk inflation
+  double noise_scaling = 1;      // accel ARW inflation factor (legacy default)
+  double bias_scaling = 1;       // gyro ARW + both bias-walk inflation
   // 1-pole IIR LPF on raw IMU before integrateMeasurement. <=0 disables.
   double gyro_lpf_hz = 0.0;
   double accel_lpf_hz = 0.0;
@@ -122,15 +122,23 @@ void print_usage(const char* prog) {
       << "  --output-dir <path>\n"
       << "  --output-prefix <str>\n"
       << "  --debug-log [path]          emit per-update debug CSV\n"
-      << "                              (default path: <output-dir>/<prefix>debug.csv)\n"
-      << "  --attitude-sigma <v>        Unit3 attitude factor sigma [rad] (default 0.05)\n"
-      << "  --compass-lag-ticks <n>     shift z_gnss_comp index by n IMU ticks (signed)\n"
+      << "                              (default path: "
+         "<output-dir>/<prefix>debug.csv)\n"
+      << "  --attitude-sigma <v>        Unit3 attitude factor sigma [rad] "
+         "(default 0.05)\n"
+      << "  --compass-lag-ticks <n>     shift z_gnss_comp index by n IMU ticks "
+         "(signed)\n"
       << "  --noise-scaling <s>         accel ARW inflation (default 10)\n"
-      << "  --bias-scaling <s>          gyro ARW + bias walk inflation (default 50)\n"
-      << "  --gyro-lpf-hz <f>           1-pole IIR cutoff for gyro [Hz], 0 disables\n"
-      << "  --accel-lpf-hz <f>          1-pole IIR cutoff for accel [Hz], 0 disables\n"
-      << "  --baseline-yaw-offset-deg <d> Rz rotation of baseline_body to correct\n"
-      << "                              rover-antenna yaw miscalibration (default 0)\n"
+      << "  --bias-scaling <s>          gyro ARW + bias walk inflation "
+         "(default 50)\n"
+      << "  --gyro-lpf-hz <f>           1-pole IIR cutoff for gyro [Hz], 0 "
+         "disables\n"
+      << "  --accel-lpf-hz <f>          1-pole IIR cutoff for accel [Hz], 0 "
+         "disables\n"
+      << "  --baseline-yaw-offset-deg <d> Rz rotation of baseline_body to "
+         "correct\n"
+      << "                              rover-antenna yaw miscalibration "
+         "(default 0)\n"
       << "  -h, --help\n";
 }
 
@@ -424,7 +432,7 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
   const double bias_scaling = opts.bias_scaling;
 
   const double q_v = std::pow(noise_scaling * vrw / 60.0, 2.0);
-  const double q_o = std::pow((bias_scaling * arw / 60.0) * deg2rad(1.0), 2.0);
+  const double q_o = std::pow((noise_scaling * arw / 60.0) * deg2rad(1.0), 2.0);
   const double q_b_v =
       (2.0 / T_acc) *
       std::pow(bias_scaling * bias_instability_acc * (g0 / 1000.0), 2.0);
@@ -432,7 +440,7 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
       (2.0 / T_ars) *
       std::pow((bias_scaling * bias_instability_ars / 3600.0) * deg2rad(1.0),
                2.0);
-  const double q_p = 1e-40;
+  const double q_p = 1e-3;
 
   // --- Preintegration params ---
   auto p = gtsam::PreintegrationCombinedParamsT<BIAS>::MakeSharedD(g0);
@@ -463,7 +471,7 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
   // PARS noise models (1-d each; robust kernel applied if requested)
   auto pars_azi_base = gtsam::noiseModel::Isotropic::Sigma(1, deg2rad(5.0));
   auto pars_ele_base = gtsam::noiseModel::Isotropic::Sigma(1, deg2rad(5.0));
-  auto pars_range_base = gtsam::noiseModel::Isotropic::Sigma(1, 1.5);
+  auto pars_range_base = gtsam::noiseModel::Isotropic::Sigma(1, 2.5);
   auto pars_azi_noise =
       wrap_robust(pars_azi_base, opts.robust, opts.robust_threshold);
   auto pars_ele_noise =
@@ -486,6 +494,7 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
   const gtsam::Point3 p_imu_rover_b(0.153, -0.019, -0.302);
   const gtsam::Point3 p_imu_bm_b(-0.310, 0.156, -0.300);
   gtsam::Point3 baseline_body = p_imu_rover_b - p_imu_bm_b;
+  baseline_body *= -1;
   if (opts.baseline_yaw_offset_deg != 0.0) {
     const double th = opts.baseline_yaw_offset_deg * M_PI / 180.0;
     baseline_body = gtsam::Rot3::Rz(th).rotate(baseline_body);
@@ -508,6 +517,7 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
   const double A_pos_z = 5.0;
   const double A_acc_bias = (50.0 * g0 / 1000.0);
   const double A_gyro_bias = deg2rad(360.0 / 3600.0);
+  // const double A_gyro_bias = deg2rad(360.0 / 3600.0);
   const double A_baro_bias = 1.0;
 
   BIAS prior_bias;
@@ -527,7 +537,7 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
   isam_params.relinearizeSkip = 1;
   isam_params.relinearizeThreshold = 0.001;
   isam_params.findUnusedFactorSlots = true;
-  const double smoother_lag = 2.0;
+  const double smoother_lag = 5.0;
   gtsam::IncrementalFixedLagSmoother smoother(smoother_lag, isam_params);
 
   gtsam::NonlinearFactorGraph graph;
@@ -622,15 +632,17 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
 
   std::ofstream debug_ofs;
   if (opts.debug_log) {
-    std::string path = opts.debug_log_file.empty()
-                           ? (opts.output_dir + opts.output_prefix + "debug.csv")
-                           : opts.debug_log_file;
+    std::string path =
+        opts.debug_log_file.empty()
+            ? (opts.output_dir + opts.output_prefix + "debug.csv")
+            : opts.debug_log_file;
     debug_ofs.open(path);
     if (!debug_ofs) {
       std::cerr << "Warning: could not open debug log " << path << "\n";
     } else {
       debug_ofs
-          << "t,correction_idx,idx,mb_tick,rover_tick,baro_tick,before_handover,"
+          << "t,correction_idx,idx,mb_tick,rover_tick,baro_tick,before_"
+             "handover,"
           << "yaw_prop,yaw_post,pitch_prop,pitch_post,roll_prop,roll_post,"
           << "att_innov_u,att_innov_v,att_innov_norm,"
           << "z_gnss_comp_x,z_gnss_comp_y,z_gnss_comp_z,"
@@ -649,8 +661,8 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
   const bool use_gyro_lpf = opts.gyro_lpf_hz > 0.0;
   const bool use_accel_lpf = opts.accel_lpf_hz > 0.0;
   if (use_gyro_lpf || use_accel_lpf) {
-    printf("IMU LPF: gyro=%.1f Hz, accel=%.1f Hz\n",
-           opts.gyro_lpf_hz, opts.accel_lpf_hz);
+    printf("IMU LPF: gyro=%.1f Hz, accel=%.1f Hz\n", opts.gyro_lpf_hz,
+           opts.accel_lpf_hz);
   }
 
   for (int64_t idx = 1; idx < N; ++idx) {
@@ -787,14 +799,17 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
       // baselines on MB-only ticks from injecting a degenerate Unit3
       // constraint (previously caused a yaw zigzag).
       if (rover_tick) {
-        const gtsam::Unit3 nZ_meas(z_gnss_comp_shifted[idx]);
-        const gtsam::Unit3 bRef_body(baseline_body);
-        if constexpr (UseSE23) {
-          graph.add(parnav::ExtendedPoseAttitudeFactor(
-              X(correction_count), nZ_meas, attitude_noise, bRef_body));
-        } else {
-          graph.add(gtsam::Pose3AttitudeFactor(
-              X(correction_count), nZ_meas, attitude_noise, bRef_body));
+        const auto& z = z_gnss_comp_shifted[idx];
+        if (z.norm() > 1e-3) {
+          const gtsam::Unit3 nZ_meas(z_gnss_comp_shifted[idx]);
+          const gtsam::Unit3 bRef_body(baseline_body);
+          if constexpr (UseSE23) {
+            graph.add(parnav::ExtendedPoseAttitudeFactor(
+                X(correction_count), nZ_meas, attitude_noise, bRef_body));
+          } else {
+            graph.add(gtsam::Pose3AttitudeFactor(X(correction_count), nZ_meas,
+                                                 attitude_noise, bRef_body));
+          }
         }
       }
       if (baro_tick) {
@@ -823,6 +838,7 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
                                                    -pars_origin, R_rn));
         }
       }
+
       if (baro_tick) {
         graph.add(parnav::BaroFactor<PoseParam>(X(correction_count),
                                                 D(correction_count),
@@ -905,8 +921,8 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
       double inn_u = std::numeric_limits<double>::quiet_NaN();
       double inn_v = std::numeric_limits<double>::quiet_NaN();
       double inn_n = std::numeric_limits<double>::quiet_NaN();
-      Eigen::Vector3d nPred = Eigen::Vector3d::Constant(
-          std::numeric_limits<double>::quiet_NaN());
+      Eigen::Vector3d nPred =
+          Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN());
       if (rover_tick && before_handover) {
         const gtsam::Unit3 nZ_meas(z_gnss_comp_shifted[idx]);
         nPred = R_prop.matrix() * baseline_body.normalized();
@@ -928,9 +944,9 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
                 << (baro_tick ? 1 : 0) << ',' << (before_handover ? 1 : 0)
                 << ',' << yaw_prop << ',' << yaw_post << ',' << pitch_prop
                 << ',' << pitch_post << ',' << roll_prop << ',' << roll_post
-                << ',' << inn_u << ',' << inn_v << ',' << inn_n << ','
-                << zc.x() << ',' << zc.y() << ',' << zc.z() << ',' << nPred.x()
-                << ',' << nPred.y() << ',' << nPred.z() << ',' << bg.x() << ','
+                << ',' << inn_u << ',' << inn_v << ',' << inn_n << ',' << zc.x()
+                << ',' << zc.y() << ',' << zc.z() << ',' << nPred.x() << ','
+                << nPred.y() << ',' << nPred.z() << ',' << bg.x() << ','
                 << bg.y() << ',' << bg.z() << ',' << ba.x() << ',' << ba.y()
                 << ',' << ba.z() << ',' << baseline_body.x() << ','
                 << baseline_body.y() << ',' << baseline_body.z() << '\n';
