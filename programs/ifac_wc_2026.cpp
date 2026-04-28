@@ -116,6 +116,8 @@ struct Options {
   // QFF/QNH. Negative means "auto-calibrate from the static window using
   // baro_origin_msl as the truth altitude" (default).
   double baro_p0_kpa = -1.0;
+  // Measurement-noise sigma [m] on the BaroFactor.
+  double baro_sigma = 1.0;
 };
 
 namespace {
@@ -162,6 +164,8 @@ void print_usage(const char* prog) {
       << "                              (default: auto-calibrate from static "
          "window\n"
       << "                              against --baro-origin-msl)\n"
+      << "  --baro-sigma <m>            BaroFactor measurement sigma "
+         "(default 1.0)\n"
       << "  -h, --help\n";
 }
 
@@ -278,6 +282,9 @@ bool parse_args(int argc, char** argv, Options& o) {
     } else if (a == "--baro-p0-kpa") {
       if (!need(i, "--baro-p0-kpa")) return false;
       o.baro_p0_kpa = std::stod(argv[++i]);
+    } else if (a == "--baro-sigma") {
+      if (!need(i, "--baro-sigma")) return false;
+      o.baro_sigma = std::stod(argv[++i]);
     } else {
       std::cerr << "Unknown arg: " << a << "\n";
       print_usage(argv[0]);
@@ -500,7 +507,7 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
 
   auto yaw_noise = gtsam::noiseModel::Isotropic::Sigma(1, 7.0);
 
-  auto baro_noise = gtsam::noiseModel::Isotropic::Sigma(1, 1.0);
+  auto baro_noise = gtsam::noiseModel::Isotropic::Sigma(1, opts.baro_sigma);
 
   // PARS noise models (1-d each; robust kernel applied if requested)
   auto pars_azi_base = gtsam::noiseModel::Isotropic::Sigma(1, deg2rad(5.0));
@@ -1079,9 +1086,11 @@ int main(int argc, char** argv) {
          opts.use_gauss_markov ? "Gauss-Markov" : "Constant");
   printf("Handover:    %s\n", ho_tag);
   printf("Robust:      %s (k=%.4f)\n", rb_tag, opts.robust_threshold);
-  printf("Baro:        origin_msl=%.2f m, bias_sigma=%.2f m, p0=%s\n",
-         opts.baro_origin_msl, opts.baro_bias_sigma,
-         opts.baro_p0_kpa > 0.0 ? "manual" : "auto");
+  printf(
+      "Baro:        origin_msl=%.2f m, sigma=%.2f m, bias_sigma=%.2f m, "
+      "p0=%s\n",
+      opts.baro_origin_msl, opts.baro_sigma, opts.baro_bias_sigma,
+      opts.baro_p0_kpa > 0.0 ? "manual" : "auto");
 
   auto data = parse_multirotor_csv(opts.input_file);
   if (!data) return 1;
