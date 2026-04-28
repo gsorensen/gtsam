@@ -587,9 +587,34 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
   graph.addPrior<BIAS>(B(0), prior_bias, bias_noise);
   values.insert(B(0), prior_bias);
   timestamps[B(0)] = 0.0;
+  double init_baro_bias = 0.0;
   if (use_baro) {
-    graph.addPrior<double>(D(0), 0.0, baro_bias_noise);
-    values.insert(D(0), 0.0);
+    // Initialise the baro bias so the first residual is ~0: assume the rig is
+    // static at the NED origin (pose.z == 0) at startup, so
+    //   bias = height_from_pressure(p_avg) - base_height_msl
+    // makes residual ((-p.z+bias) - (height(p) - base)) vanish. Average the
+    // first valid baro samples in the static window to reject single-shot
+    // sensor noise.
+    double p_sum = 0.0;
+    int p_n = 0;
+    for (size_t k = 0; k < d.t.size() && d.t[k] - d.t[0] < 40.0; ++k) {
+      if (d.baro_idx[k] != 0) {
+        p_sum += d.z_baro[k];
+        ++p_n;
+      }
+    }
+    if (p_n > 0) {
+      const double p_avg = p_sum / p_n;
+      init_baro_bias =
+          parnav::BaroFactor<PoseParam>::height_from_pressure(p_avg) -
+          opts.baro_origin_msl;
+      printf("Baro init:   p_avg=%.3f kPa over %d samples -> bias0=%.2f m\n",
+             p_avg, p_n, init_baro_bias);
+    } else {
+      printf("Baro init:   no static-window samples; bias0=0.0\n");
+    }
+    graph.addPrior<double>(D(0), init_baro_bias, baro_bias_noise);
+    values.insert(D(0), init_baro_bias);
     timestamps[D(0)] = 0.0;
   }
   smoother.update(graph, values, timestamps);
@@ -606,7 +631,7 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
       return gtsam::NavState(gtsam::Pose3(R0, p0), v0);
   }();
   BIAS prev_bias = prior_bias;
-  double prev_baro_bias = 0.0;
+  double prev_baro_bias = init_baro_bias;
 
   // Result storage
   std::vector<gtsam::Rot3> est_R{R0};
@@ -614,7 +639,7 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
   std::vector<Eigen::Vector3d> est_v{v0};
   std::vector<Eigen::Vector3d> est_ba{prior_bias.accelerometer()};
   std::vector<Eigen::Vector3d> est_bg{prior_bias.gyroscope()};
-  std::vector<double> est_baro_bias{0.0};
+  std::vector<double> est_baro_bias{init_baro_bias};
   std::vector<Eigen::Vector3d> pos_sigma{Eigen::Vector3d::Zero()};
   std::vector<Eigen::Vector3d> vel_sigma{Eigen::Vector3d::Zero()};
   std::vector<Eigen::Vector3d> att_sigma{Eigen::Vector3d::Zero()};
