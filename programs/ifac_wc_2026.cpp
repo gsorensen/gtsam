@@ -118,6 +118,11 @@ struct Options {
   double baro_p0_kpa = -1.0;
   // Measurement-noise sigma [m] on the BaroFactor.
   double baro_sigma = 1.0;
+  // Random-walk sigma [m/step] on the baro bias chain. The old MEKF used a
+  // single static bias variable (effectively zero process noise); a tight
+  // value here approximates that, but too tight welds the chain so it cannot
+  // slacken at handover.
+  double baro_bias_rw_sigma = 1e-3;
 };
 
 namespace {
@@ -166,6 +171,9 @@ void print_usage(const char* prog) {
       << "                              against --baro-origin-msl)\n"
       << "  --baro-sigma <m>            BaroFactor measurement sigma "
          "(default 1.0)\n"
+      << "  --baro-bias-rw-sigma <m>    baro-bias random-walk sigma per "
+         "correction\n"
+      << "                              (default 1e-3)\n"
       << "  -h, --help\n";
 }
 
@@ -285,6 +293,9 @@ bool parse_args(int argc, char** argv, Options& o) {
     } else if (a == "--baro-sigma") {
       if (!need(i, "--baro-sigma")) return false;
       o.baro_sigma = std::stod(argv[++i]);
+    } else if (a == "--baro-bias-rw-sigma") {
+      if (!need(i, "--baro-bias-rw-sigma")) return false;
+      o.baro_bias_rw_sigma = std::stod(argv[++i]);
     } else {
       std::cerr << "Unknown arg: " << a << "\n";
       print_usage(argv[0]);
@@ -845,7 +856,8 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
 
     // --- Baro bias random walk + state ---
     if (use_baro) {
-      auto rw_noise = gtsam::noiseModel::Isotropic::Sigma(1, 1e-3);
+      auto rw_noise =
+          gtsam::noiseModel::Isotropic::Sigma(1, opts.baro_bias_rw_sigma);
       graph.add(gtsam::BetweenFactor<double>(
           D(correction_count - 1), D(correction_count), 0.0, rw_noise));
       values.insert(D(correction_count), prev_baro_bias);
@@ -1088,9 +1100,9 @@ int main(int argc, char** argv) {
   printf("Robust:      %s (k=%.4f)\n", rb_tag, opts.robust_threshold);
   printf(
       "Baro:        origin_msl=%.2f m, sigma=%.2f m, bias_sigma=%.2f m, "
-      "p0=%s\n",
+      "rw_sigma=%.0e m, p0=%s\n",
       opts.baro_origin_msl, opts.baro_sigma, opts.baro_bias_sigma,
-      opts.baro_p0_kpa > 0.0 ? "manual" : "auto");
+      opts.baro_bias_rw_sigma, opts.baro_p0_kpa > 0.0 ? "manual" : "auto");
 
   auto data = parse_multirotor_csv(opts.input_file);
   if (!data) return 1;
