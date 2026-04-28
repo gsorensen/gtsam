@@ -104,6 +104,13 @@ struct Options {
   double accel_lpf_hz = 0.0;
   // Rz(theta) applied to baseline_body to correct rover-antenna yaw miscal.
   double baseline_yaw_offset_deg = 0.0;
+  // MSL altitude [m] of the NED origin, subtracted inside BaroFactor so that
+  // the residual stays bounded. Replace with the surveyed/known field height
+  // for each campaign (legacy default 271.7171 was specific to a prior site).
+  double baro_origin_msl = 271.8671 - 0.15;
+  // Sigma [m] on baro bias prior. Bumped from 1.0 so it can absorb sensor
+  // bias drift without fighting --baro-origin-msl.
+  double baro_bias_sigma = 5.0;
 };
 
 namespace {
@@ -139,6 +146,12 @@ void print_usage(const char* prog) {
          "correct\n"
       << "                              rover-antenna yaw miscalibration "
          "(default 0)\n"
+      << "  --baro-origin-msl <m>       MSL altitude [m] of NED origin used "
+         "inside\n"
+      << "                              BaroFactor (default 271.7171, set to "
+         "field height)\n"
+      << "  --baro-bias-sigma <m>       sigma [m] of baro-bias prior "
+         "(default 5.0)\n"
       << "  -h, --help\n";
 }
 
@@ -246,6 +259,12 @@ bool parse_args(int argc, char** argv, Options& o) {
     } else if (a == "--baseline-yaw-offset-deg") {
       if (!need(i, "--baseline-yaw-offset-deg")) return false;
       o.baseline_yaw_offset_deg = std::stod(argv[++i]);
+    } else if (a == "--baro-origin-msl") {
+      if (!need(i, "--baro-origin-msl")) return false;
+      o.baro_origin_msl = std::stod(argv[++i]);
+    } else if (a == "--baro-bias-sigma") {
+      if (!need(i, "--baro-bias-sigma")) return false;
+      o.baro_bias_sigma = std::stod(argv[++i]);
     } else {
       std::cerr << "Unknown arg: " << a << "\n";
       print_usage(argv[0]);
@@ -518,7 +537,7 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
   const double A_acc_bias = (50.0 * g0 / 1000.0);
   const double A_gyro_bias = deg2rad(360.0 / 3600.0);
   // const double A_gyro_bias = deg2rad(360.0 / 3600.0);
-  const double A_baro_bias = 1.0;
+  const double A_baro_bias = opts.baro_bias_sigma;
 
   BIAS prior_bias;
   if constexpr (std::is_same_v<BIAS, gtsam::imuBias::GaussMarkovBias>) {
@@ -813,9 +832,9 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
         }
       }
       if (baro_tick) {
-        graph.add(parnav::BaroFactor<PoseParam>(X(correction_count),
-                                                D(correction_count),
-                                                d.z_baro[idx], baro_noise));
+        graph.add(parnav::BaroFactor<PoseParam>(
+            X(correction_count), D(correction_count), d.z_baro[idx], baro_noise,
+            opts.baro_origin_msl));
       }
     } else if (post_tick) {
       if (d.bt_meas_idx[idx] != 0) {
@@ -840,9 +859,9 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
       }
 
       if (baro_tick) {
-        graph.add(parnav::BaroFactor<PoseParam>(X(correction_count),
-                                                D(correction_count),
-                                                d.z_baro[idx], baro_noise));
+        graph.add(parnav::BaroFactor<PoseParam>(
+            X(correction_count), D(correction_count), d.z_baro[idx], baro_noise,
+            opts.baro_origin_msl));
       }
     }
 
@@ -1016,6 +1035,8 @@ int main(int argc, char** argv) {
          opts.use_gauss_markov ? "Gauss-Markov" : "Constant");
   printf("Handover:    %s\n", ho_tag);
   printf("Robust:      %s (k=%.4f)\n", rb_tag, opts.robust_threshold);
+  printf("Baro:        origin_msl=%.2f m, bias_sigma=%.2f m\n",
+         opts.baro_origin_msl, opts.baro_bias_sigma);
 
   auto data = parse_multirotor_csv(opts.input_file);
   if (!data) return 1;
