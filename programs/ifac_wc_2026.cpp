@@ -653,9 +653,8 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
           "p0=%.3f kPa\n",
           p_avg, p_n, opts.baro_origin_msl, baro_p0);
     } else {
-      printf(
-          "Baro init:   no static-window samples; p0=%.3f kPa (standard)\n",
-          baro_p0);
+      printf("Baro init:   no static-window samples; p0=%.3f kPa (standard)\n",
+             baro_p0);
     }
     // Bias prior centred at 0; with a calibrated p0 the bias only needs to
     // soak up real sensor drift.
@@ -863,14 +862,12 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
       timestamps[B(correction_count)] = t_now;
     }
 
-    // --- Baro bias random walk + state ---
+    // --- Baro bias: single static state D(0) for the whole run.
+    // Refresh its timestamp every correction so the fixed-lag smoother does
+    // not marginalize it out. This matches the old MEKF (one bias variable,
+    // zero process noise).
     if (use_baro) {
-      auto rw_noise =
-          gtsam::noiseModel::Isotropic::Sigma(1, opts.baro_bias_rw_sigma);
-      graph.add(gtsam::BetweenFactor<double>(
-          D(correction_count - 1), D(correction_count), 0.0, rw_noise));
-      values.insert(D(correction_count), prev_baro_bias);
-      timestamps[D(correction_count)] = t_now;
+      timestamps[D(0)] = t_now;
     }
 
     // --- Aiding factors ---
@@ -904,9 +901,9 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
         }
       }
       if (baro_tick) {
-        graph.add(parnav::BaroFactor<PoseParam>(
-            X(correction_count), D(correction_count), d.z_baro[idx], baro_noise,
-            opts.baro_origin_msl, baro_p0));
+        graph.add(parnav::BaroFactor<PoseParam>(X(correction_count), D(0),
+                                                d.z_baro[idx], baro_noise,
+                                                opts.baro_origin_msl, baro_p0));
       }
     } else if (post_tick) {
       if (d.bt_meas_idx[idx] != 0) {
@@ -931,9 +928,9 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
       }
 
       if (baro_tick) {
-        graph.add(parnav::BaroFactor<PoseParam>(
-            X(correction_count), D(correction_count), d.z_baro[idx], baro_noise,
-            opts.baro_origin_msl, baro_p0));
+        graph.add(parnav::BaroFactor<PoseParam>(X(correction_count), D(0),
+                                                d.z_baro[idx], baro_noise,
+                                                opts.baro_origin_msl, baro_p0));
       }
     }
 
@@ -960,7 +957,7 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
       v_est = vel;
     }
     prev_bias = result.at<BIAS>(B(correction_count));
-    if (use_baro) prev_baro_bias = result.at<double>(D(correction_count));
+    if (use_baro) prev_baro_bias = result.at<double>(D(0));
 
     preintegrated->resetIntegrationAndSetBias(prev_bias);
 

@@ -3,6 +3,7 @@ for r in none gm tukey; do
         --preint se3 --bias cb \
         --handover angle-range --robust $r \
         --compass-lag-ticks 0 \
-        --noise-scaling 100 \
-        --bias-scaling 5
+        --noise-scaling 10 \
+        --bias-scaling 50 \
+        --baro-origin-msl 100
 done
