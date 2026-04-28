@@ -123,6 +123,9 @@ struct Options {
   // value here approximates that, but too tight welds the chain so it cannot
   // slacken at handover.
   double baro_bias_rw_sigma = 1e-3;
+  // Override the handover switch time (seconds). <0 means use the default
+  // baked into handover_cfg() for the chosen --handover.
+  double switch_time = -1.0;
 };
 
 namespace {
@@ -174,6 +177,8 @@ void print_usage(const char* prog) {
       << "  --baro-bias-rw-sigma <m>    baro-bias random-walk sigma per "
          "correction\n"
       << "                              (default 1e-3)\n"
+      << "  --switch-time <s>           override handover switch time "
+         "[seconds]\n"
       << "  -h, --help\n";
 }
 
@@ -296,6 +301,9 @@ bool parse_args(int argc, char** argv, Options& o) {
     } else if (a == "--baro-bias-rw-sigma") {
       if (!need(i, "--baro-bias-rw-sigma")) return false;
       o.baro_bias_rw_sigma = std::stod(argv[++i]);
+    } else if (a == "--switch-time") {
+      if (!need(i, "--switch-time")) return false;
+      o.switch_time = std::stod(argv[++i]);
     } else {
       std::cerr << "Unknown arg: " << a << "\n";
       print_usage(argv[0]);
@@ -468,7 +476,8 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
   using PoseParam =
       std::conditional_t<UseSE23, gtsam::ExtendedPose3, gtsam::Pose3>;
 
-  const auto hcfg = handover_cfg(opts.handover);
+  auto hcfg = handover_cfg(opts.handover);
+  if (opts.switch_time >= 0.0) hcfg.switch_time = opts.switch_time;
   const bool use_baro = hcfg.use_baro;
   const bool use_range = hcfg.use_range;
 
