@@ -39,22 +39,36 @@ class BaroFactor
   ~BaroFactor() override = default;
 
   /// @param pressure_kPa raw pressure measurement (kilopascal).
+  /// @param p0_kPa local sea-level reference pressure (kPa); the standard
+  ///        101.29 is only correct on a standard day -- on any other day this
+  ///        is the local QFF/QNH and must be calibrated.
   BaroFactor(gtsam::Key pose_key, gtsam::Key baro_bias_key, double pressure_kPa,
-             const gtsam::SharedNoiseModel& model,
-             double base_height = 271.8671 - 0.15)
+             const gtsam::SharedNoiseModel& model, double base_height = 0.0,
+             double p0_kPa = 101.29)
       : Base(model, pose_key, baro_bias_key),
         base_height_(base_height),
-        height_rel_(height_from_pressure(pressure_kPa) - base_height) {}
+        height_rel_(height_from_pressure(pressure_kPa, p0_kPa) - base_height) {}
 
   auto evaluateError(const Pose& pose, const double& bias,
                      gtsam::OptionalMatrixType H1 = OptionalNone,
                      gtsam::OptionalMatrixType H2 = OptionalNone) const
       -> gtsam::Vector override;
 
-  /// ICAO standard atmosphere pressure (kPa) -> height (m).
-  static inline double height_from_pressure(double n_kPa) {
-    return (std::pow(n_kPa / 101.29, 1.0 / 5.256) * 288.08 - 273.1 - 15.04) /
+  /// NASA-GRC simple troposphere model: pressure (kPa) -> height (m).
+  /// p0_kPa is the *local* sea-level reference; the canonical 101.29 only
+  /// holds on a standard day.
+  static inline double height_from_pressure(double n_kPa,
+                                            double p0_kPa = 101.29) {
+    return (std::pow(n_kPa / p0_kPa, 1.0 / 5.256) * 288.08 - 273.1 - 15.04) /
            -0.00649;
+  }
+
+  /// Solve for p0 such that height_from_pressure(p_meas, p0) == h_target.
+  /// Inverse of the forward formula above; T0 constants kept identical.
+  static inline double p0_from_known_altitude(double p_meas_kPa,
+                                              double h_target_m) {
+    const double T_K = (273.1 + 15.04) - 0.00649 * h_target_m;
+    return p_meas_kPa / std::pow(T_K / 288.08, 5.256);
   }
 };
 
