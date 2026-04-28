@@ -402,20 +402,21 @@ gtsam::SharedNoiseModel wrap_robust(const gtsam::SharedNoiseModel& base,
 struct HandoverCfg {
   double switch_time;
   bool use_baro;
+  bool use_range;
 };
 
 HandoverCfg handover_cfg(Handover h) {
   switch (h) {
     case Handover::None:
-      return {1e9, false};
+      return {1e9, false, false};
     case Handover::Angle:
-      return {450.0, false};
+      return {200.0, false, false};
     case Handover::AngleBaro:
-      return {200.0, true};
+      return {200.0, true, false};
     case Handover::AngleRange:
-      return {200.0, false};
+      return {200.0, false, true};
   }
-  return {1e9, false};
+  return {1e9, false, false};
 }
 
 void write_vec3(const std::string& path,
@@ -451,6 +452,7 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
 
   const auto hcfg = handover_cfg(opts.handover);
   const bool use_baro = hcfg.use_baro;
+  const bool use_range = hcfg.use_range;
 
   // --- Sensor parameters (from original program) ---
   const double g0 = 9.80665;
@@ -893,7 +895,7 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
             X(correction_count), pars_azi_noise, azi, -pars_origin, R_rn));
         graph.add(parnav::ElevationFactor<PoseParam>(
             X(correction_count), pars_ele_noise, ele, -pars_origin, R_rn));
-        if (!use_baro) {
+        if (use_range) {
           graph.add(parnav::RangeFactor<PoseParam>(X(correction_count),
                                                    pars_range_noise, range,
                                                    -pars_origin, R_rn));
