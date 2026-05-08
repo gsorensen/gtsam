@@ -5,13 +5,13 @@
 file(GLOB program_files "*.cpp")
 foreach(program_file ${program_files})
     get_filename_component(program_name ${program_file} NAME_WE)
-    add_executable(${program_name}
-        ${program_file}
-        $<TARGET_OBJECTS:parnav_extensions>
-    )
+    add_executable(${program_name} ${program_file})
     target_include_directories(${program_name} PRIVATE
         ${CMAKE_SOURCE_DIR}/extensions
     )
-    target_link_libraries(${program_name} gtsam gtsam_unstable)
+    # Linking the OBJECT library propagates both its object files and its
+    # INTERFACE link dependencies (cnpy, nlohmann_json, etc.) — required so
+    # MultiModalSimLoader.cpp.o resolves cnpy::npz_load at link time.
+    target_link_libraries(${program_name} parnav_extensions gtsam gtsam_unstable)
     gtsam_apply_build_flags(${program_name})
 endforeach()
