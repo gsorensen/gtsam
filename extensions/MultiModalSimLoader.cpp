@@ -96,6 +96,21 @@ SimMeta loadSimMeta(const std::string& json_path) {
     s.angle_noise_deg = c.value("angle_noise_deg", 0.0);
     m.camera.push_back(std::move(s));
   }
+
+  if (j.contains("trust")) {
+    const auto& t = j.at("trust");
+    m.trust.enable = t.value("enable", false);
+    m.trust.scaling = t.value("scaling", std::string{"inverse"});
+    m.trust.floor = t.value("floor", 0.001);
+    m.trust.linear_k = t.value("linear_k", 5.0);
+    m.trust.alpha1 = t.value("alpha1", 0.9);
+    m.trust.alpha2 = t.value("alpha2", 0.99);
+    m.trust.gate_bad_ratio = t.value("gate_bad_ratio", 0.5);
+    m.trust.gnss_pos_thresh = t.value("gnss_pos_thresh", 5.99);
+    m.trust.gnss_hdg_thresh = t.value("gnss_hdg_thresh", 3.84);
+    m.trust.robust_k_mult = t.value("robust_k_mult", 3.0);
+    m.trust.gnss_veto = t.value("gnss_veto", false);
+  }
   return m;
 }
 
@@ -119,8 +134,10 @@ SimData3D loadSimData(const std::string& npz_path, const SimMeta& meta) {
   d.gnss_pos_valid = takeU8(z, "gnss_pos_valid");
   d.gnss_yaw = takeDouble(z, "gnss_yaw");
   d.gnss_yaw_valid = takeU8(z, "gnss_yaw_valid");
-  d.polar = takeDouble(z, "polar");
-  d.polar_valid = takeU8(z, "polar_valid");
+  d.polar_marker = takeDouble(z, "polar_marker");
+  d.polar_marker_valid = takeU8(z, "polar_marker_valid");
+  d.polar_shoreline = takeDouble(z, "polar_shoreline");
+  d.polar_shoreline_valid = takeU8(z, "polar_shoreline_valid");
   d.camera = takeDouble(z, "camera");
   d.camera_valid = takeU8(z, "camera_valid");
 
@@ -129,10 +146,12 @@ SimData3D loadSimData(const std::string& npz_path, const SimMeta& meta) {
   d.shoreline = takeDouble(z, "shoreline");
   d.n_shoreline = static_cast<int>(d.shoreline.size() / 6);
 
-  // Recover Kp / Kc from total sizes.
+  // Recover Kpm / Kps / Kc from total sizes.
   if (d.n_polar > 0 && d.T > 0) {
-    const std::size_t per_sensor = d.polar.size() / d.n_polar;
-    d.kmax_polar = static_cast<int>(per_sensor / (d.T * 3));
+    const std::size_t per_marker = d.polar_marker.size() / d.n_polar;
+    d.kmax_polar_marker = static_cast<int>(per_marker / (d.T * 3));
+    const std::size_t per_shore = d.polar_shoreline.size() / d.n_polar;
+    d.kmax_polar_shoreline = static_cast<int>(per_shore / (d.T * 3));
   }
   if (d.n_camera > 0 && d.T > 0) {
     const std::size_t per_sensor = d.camera.size() / d.n_camera;

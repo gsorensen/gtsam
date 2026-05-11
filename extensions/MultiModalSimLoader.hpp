@@ -37,6 +37,20 @@ struct CameraSensorMeta {
   double angle_noise_deg{0.0};
 };
 
+struct TrustConfig {
+  bool enable{false};
+  std::string scaling{"inverse"};   // inverse | inverse_sqrt | linear | off
+  double floor{0.001};
+  double linear_k{5.0};
+  double alpha1{0.9};
+  double alpha2{0.99};
+  double gate_bad_ratio{0.5};
+  double gnss_pos_thresh{5.99};      // chi2_2 @ 95%
+  double gnss_hdg_thresh{3.84};      // chi2_1 @ 95%
+  double robust_k_mult{3.0};
+  bool gnss_veto{false};
+};
+
 struct SimMeta {
   std::string scenario;
   int n_ships{0};
@@ -46,6 +60,7 @@ struct SimMeta {
   std::vector<GnssSensorMeta> gnss;
   std::vector<PolarSensorMeta> polar;
   std::vector<CameraSensorMeta> camera;
+  TrustConfig trust;
 };
 
 // Numeric payload. Indices match SimMeta::{gnss,polar,camera} ordering.
@@ -71,11 +86,15 @@ struct SimData3D {
   std::vector<double> gnss_yaw;              // (Ng * T)
   std::vector<std::uint8_t> gnss_yaw_valid;  // (Ng * T)
 
-  // Polar: (Np * T * Kp * 3) [range, az, el]; valid (Np * T * Kp)
+  // Polar marker detections: (Np * T * Kpm * 3) [range, az, el]; valid (Np*T*Kpm)
   int n_polar{0};
-  int kmax_polar{0};
-  std::vector<double> polar;
-  std::vector<std::uint8_t> polar_valid;
+  int kmax_polar_marker{0};
+  std::vector<double> polar_marker;
+  std::vector<std::uint8_t> polar_marker_valid;
+  // Polar shoreline detections: (Np * T * Kps * 3) [range, az, el]; valid (Np*T*Kps)
+  int kmax_polar_shoreline{0};
+  std::vector<double> polar_shoreline;
+  std::vector<std::uint8_t> polar_shoreline_valid;
 
   // Camera: (Nc * T * Kc * 2) [az, el]; valid (Nc * T * Kc)
   int n_camera{0};
@@ -115,12 +134,19 @@ struct SimData3D {
   double gnssYaw(int s, int t) const {
     return gnss_yaw[s * T + t];
   }
-  bool polarValid(int s, int t, int k) const {
-    return polar_valid[(s * T + t) * kmax_polar + k] != 0;
+  bool polarMarkerValid(int s, int t, int k) const {
+    return polar_marker_valid[(s * T + t) * kmax_polar_marker + k] != 0;
   }
-  Eigen::Map<const Eigen::Matrix<double, 3, 1>> polarReading(int s, int t, int k) const {
+  Eigen::Map<const Eigen::Matrix<double, 3, 1>> polarMarkerReading(int s, int t, int k) const {
     return Eigen::Map<const Eigen::Matrix<double, 3, 1>>(
-        polar.data() + ((s * T + t) * kmax_polar + k) * 3);
+        polar_marker.data() + ((s * T + t) * kmax_polar_marker + k) * 3);
+  }
+  bool polarShorelineValid(int s, int t, int k) const {
+    return polar_shoreline_valid[(s * T + t) * kmax_polar_shoreline + k] != 0;
+  }
+  Eigen::Map<const Eigen::Matrix<double, 3, 1>> polarShorelineReading(int s, int t, int k) const {
+    return Eigen::Map<const Eigen::Matrix<double, 3, 1>>(
+        polar_shoreline.data() + ((s * T + t) * kmax_polar_shoreline + k) * 3);
   }
   bool cameraValid(int s, int t, int k) const {
     return camera_valid[(s * T + t) * kmax_camera + k] != 0;

@@ -11,6 +11,9 @@ add_library(parnav_extensions OBJECT
     GNSSAttFactor.cpp
     PreintegrationHelpers.cpp
     MultiModalSimLoader.cpp
+    SelfTrust.cpp
+    MarkerAssociation.cpp
+    MarkerAzimuthFactor.cpp
 )
 
 target_include_directories(parnav_extensions PUBLIC

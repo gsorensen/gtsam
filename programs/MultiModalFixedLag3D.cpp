@@ -13,7 +13,12 @@
  */
 
 #include "CompassFactor.hpp"
+#include "MarkerAssociation.hpp"
+#include "MarkerAzimuthFactor.hpp"
 #include "MultiModalSimLoader.hpp"
+#include "RangeFactor.hpp"
+#include "SelfTrust.hpp"
+#include "utils.hpp"
 
 #include <gtsam/geometry/Pose3.h>
 #include <gtsam/geometry/Rot3.h>
@@ -33,6 +38,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <set>
 #include <stdexcept>
 #include <string>
 
@@ -48,10 +54,25 @@ struct Args {
   int ship_index = 0;
   double lag = 5.0;
   std::string out_csv = "multimodal_estimates.csv";
+  std::string trust_csv;              // empty -> derived from out_csv
   std::string robust_pos = "none";   // none | huber | tukey | gmc
-  double robust_pos_k = 1.345;        // Huber default; Tukey ~ 4.685; GMC ~ 1.0
+  double robust_pos_k = 1.345;
   std::string robust_yaw = "none";
   double robust_yaw_k = 1.345;
+  std::string robust_polar = "none";
+  double robust_polar_k = 1.345;
+  int use_landmarks = 1;              // 1 on (default), 0 off
+  double assoc_gate_chi2 = 5.99;      // 2-DoF χ² @ 95%
+  // Trust overrides (sentinel: empty / NaN means "use sidecar value")
+  int trust_enable = -1;              // -1 keep, 0 force off, 1 force on
+  std::string trust_scaling;
+  double trust_floor = std::nan("");
+  double trust_alpha1 = std::nan("");
+  double trust_alpha2 = std::nan("");
+  double trust_pos_thresh = std::nan("");
+  double trust_hdg_thresh = std::nan("");
+  double trust_robust_k_mult = std::nan("");
+  int trust_gnss_veto = -1;
 };
 
 Args parseArgs(int argc, char** argv) {
@@ -72,12 +93,36 @@ Args parseArgs(int argc, char** argv) {
     else if (k == "--robust-pos-k") a.robust_pos_k = std::stod(next());
     else if (k == "--robust-yaw") a.robust_yaw = next();
     else if (k == "--robust-yaw-k") a.robust_yaw_k = std::stod(next());
+    else if (k == "--trust-csv") a.trust_csv = next();
+    else if (k == "--trust-enable") a.trust_enable = 1;
+    else if (k == "--no-trust") a.trust_enable = 0;
+    else if (k == "--trust-scaling") a.trust_scaling = next();
+    else if (k == "--trust-floor") a.trust_floor = std::stod(next());
+    else if (k == "--trust-alpha1") a.trust_alpha1 = std::stod(next());
+    else if (k == "--trust-alpha2") a.trust_alpha2 = std::stod(next());
+    else if (k == "--trust-gnss-pos-thresh") a.trust_pos_thresh = std::stod(next());
+    else if (k == "--trust-gnss-hdg-thresh") a.trust_hdg_thresh = std::stod(next());
+    else if (k == "--trust-robust-k-mult") a.trust_robust_k_mult = std::stod(next());
+    else if (k == "--trust-gnss-veto") a.trust_gnss_veto = 1;
+    else if (k == "--no-trust-gnss-veto") a.trust_gnss_veto = 0;
+    else if (k == "--robust-polar") a.robust_polar = next();
+    else if (k == "--robust-polar-k") a.robust_polar_k = std::stod(next());
+    else if (k == "--no-landmarks") a.use_landmarks = 0;
+    else if (k == "--landmarks") a.use_landmarks = 1;
+    else if (k == "--assoc-gate-chi2") a.assoc_gate_chi2 = std::stod(next());
     else if (k == "-h" || k == "--help") {
       std::cout
           << "MultiModalFixedLag3D --sim-data PATH --meta PATH "
           << "[--ship-index 0] [--lag 5.0] [--out estimates.csv]\n"
           << "  [--robust-pos none|huber|tukey|gmc] [--robust-pos-k K]\n"
-          << "  [--robust-yaw none|huber|tukey|gmc] [--robust-yaw-k K]\n";
+          << "  [--robust-yaw none|huber|tukey|gmc] [--robust-yaw-k K]\n"
+          << "  [--trust-enable | --no-trust] [--trust-csv PATH]\n"
+          << "  [--trust-scaling inverse|inverse_sqrt|linear|off]\n"
+          << "  [--trust-floor F] [--trust-alpha1 A] [--trust-alpha2 A]\n"
+          << "  [--trust-gnss-pos-thresh CHI2] [--trust-gnss-hdg-thresh CHI2]\n"
+          << "  [--trust-robust-k-mult K] [--trust-gnss-veto | --no-trust-gnss-veto]\n"
+          << "  [--landmarks | --no-landmarks] [--assoc-gate-chi2 5.99]\n"
+          << "  [--robust-polar none|huber|tukey|gmc] [--robust-polar-k K]\n";
       std::exit(0);
     } else {
       throw std::runtime_error("unknown flag: " + k);
@@ -105,6 +150,32 @@ gtsam::Pose3 poseFromGt(const parnav::SimData3D& d, int ship, int t) {
   auto p = d.gtPose(ship, t);
   gtsam::Rot3 R = gtsam::Rot3::Quaternion(p[3], p[4], p[5], p[6]);
   return gtsam::Pose3(R, gtsam::Point3(p[0], p[1], p[2]));
+}
+
+double wrapPi(double a) {
+  constexpr double pi = 3.14159265358979323846;
+  while (a > pi) a -= 2 * pi;
+  while (a < -pi) a += 2 * pi;
+  return a;
+}
+
+// Apply CLI overrides on top of the YAML-derived TrustConfig from the sidecar.
+parnav::TrustConfig effectiveTrust(const parnav::TrustConfig& base,
+                                   const Args& a) {
+  parnav::TrustConfig t = base;
+  if (a.trust_enable == 0) t.enable = false;
+  if (a.trust_enable == 1) t.enable = true;
+  if (!a.trust_scaling.empty()) t.scaling = a.trust_scaling;
+  if (!std::isnan(a.trust_floor)) t.floor = a.trust_floor;
+  if (!std::isnan(a.trust_alpha1)) t.alpha1 = a.trust_alpha1;
+  if (!std::isnan(a.trust_alpha2)) t.alpha2 = a.trust_alpha2;
+  if (!std::isnan(a.trust_pos_thresh)) t.gnss_pos_thresh = a.trust_pos_thresh;
+  if (!std::isnan(a.trust_hdg_thresh)) t.gnss_hdg_thresh = a.trust_hdg_thresh;
+  if (!std::isnan(a.trust_robust_k_mult))
+    t.robust_k_mult = a.trust_robust_k_mult;
+  if (a.trust_gnss_veto == 0) t.gnss_veto = false;
+  if (a.trust_gnss_veto == 1) t.gnss_veto = true;
+  return t;
 }
 
 }  // namespace
@@ -137,8 +208,61 @@ int main(int argc, char** argv) {
   auto gnss_pos_base = gtsam::noiseModel::Diagonal::Sigmas(
       (gtsam::Vector(3) << sigma_xy, sigma_xy, 0.05).finished());
   auto gnss_yaw_base = gtsam::noiseModel::Isotropic::Sigma(1, sigma_yaw);
-  auto gnss_pos_noise = wrapRobust(args.robust_pos, args.robust_pos_k, gnss_pos_base);
-  auto gnss_yaw_noise = wrapRobust(args.robust_yaw, args.robust_yaw_k, gnss_yaw_base);
+
+  // ---- Trust model ----
+  parnav::TrustConfig trust_cfg = effectiveTrust(meta.trust, args);
+  parnav::TrustScalingCfg scale_cfg{trust_cfg.scaling, trust_cfg.floor,
+                                    trust_cfg.linear_k};
+  parnav::SelfTrust trust(trust_cfg.alpha1, trust_cfg.alpha2);
+
+  // Per-GNSS-sensor trust keys for this ship.
+  struct GnssKey {
+    int sensor_idx;
+    std::string pos_key;
+    std::string hdg_key;
+  };
+  std::vector<GnssKey> gnss_keys;
+  for (int s = 0; s < d.n_gnss; ++s) {
+    const auto& gm = meta.gnss[s];
+    if (gm.ship != ship && gm.ship != -1) continue;
+    gnss_keys.push_back({s, gm.name + "_POS", gm.name + "_HDG"});
+  }
+
+  // Per-Polar-sensor cached params + trust key.
+  struct PolarSensor {
+    int sensor_idx;
+    std::string key;
+    double yaw_offset_rad;
+    double sigma_range;
+    double sigma_az_rad;
+  };
+  std::vector<PolarSensor> polar_sensors;
+  for (int s = 0; s < d.n_polar; ++s) {
+    const auto& pm = meta.polar[s];
+    // Strict per-ship match: a land-mounted polar sensor (ship == -1)
+    // observes from a stationary land position, so its detections cannot be
+    // tied to *this* ship's pose via MarkerAzimuthFactor/RangeFactor without
+    // a separate model. Excluded here.
+    if (pm.ship != ship) continue;
+    polar_sensors.push_back({s, pm.name,
+                             parnav::deg2rad(pm.relative_pose[2]),
+                             pm.range_noise,
+                             parnav::deg2rad(pm.angle_noise_deg)});
+  }
+
+  auto build_gnss_pos_noise = [&](double trust_value) {
+    double k = trust_cfg.enable ? parnav::trustScale(trust_value, scale_cfg)
+                                : 1.0;
+    auto base = gtsam::noiseModel::Diagonal::Sigmas(
+        (gtsam::Vector(3) << k * sigma_xy, k * sigma_xy, 0.05).finished());
+    return wrapRobust(args.robust_pos, args.robust_pos_k, base);
+  };
+  auto build_gnss_yaw_noise = [&](double trust_value) {
+    double k = trust_cfg.enable ? parnav::trustScale(trust_value, scale_cfg)
+                                : 1.0;
+    auto base = gtsam::noiseModel::Isotropic::Sigma(1, k * sigma_yaw);
+    return wrapRobust(args.robust_yaw, args.robust_yaw_k, base);
+  };
 
   // Heterogeneous Pose3 prior pinning (z, roll, pitch) tightly while leaving
   // (x, y, yaw) loose. Order is (rx, ry, rz, tx, ty, tz) per GTSAM's Pose3
@@ -250,22 +374,208 @@ int main(int argc, char** argv) {
     }
 
     // GNSS aiding — position and yaw are independent factors with independent
-    // validity masks and independent (robust) noise models. Spoofed position
-    // therefore cannot drag yaw with it; the M-estimator on the position side
-    // is what's expected to absorb the spoofing.
-    for (int s = 0; s < d.n_gnss; ++s) {
-      const auto& gm = meta.gnss[s];
-      if (gm.ship != ship && gm.ship != -1) continue;
-      if (d.gnssPosValid(s, t)) {
+    // validity masks and independent (robust) noise models. With trust on,
+    // a per-step innovation pre-check votes good/bad into SelfTrust; the
+    // post-vote trust scales the base sigma BEFORE the robust kernel wraps.
+    //
+    // Predictor sigma = smoother's posterior marginal at X(t-1) (captures
+    // everything the smoother has already learned: landmarks, planar pin,
+    // GNSS history, IMU history) + the IMU preintegration cov over this
+    // step. Using only the preint cov underestimates predictor uncertainty
+    // by ~100x because it ignores accumulated state uncertainty.
+    Eigen::Matrix<double, 6, 6> marg_prev =
+        Eigen::Matrix<double, 6, 6>::Zero();
+    try {
+      marg_prev = smoother.marginalCovariance(X(t - 1));
+    } catch (const std::exception&) {
+      // First-step bootstrap: no marginal yet → fall back to preint only.
+    }
+    const double sigma_marg_xy = std::sqrt(
+        0.5 * (std::max(marg_prev(3, 3), 0.0) +
+               std::max(marg_prev(4, 4), 0.0)));
+    const double sigma_marg_yaw =
+        std::sqrt(std::max(marg_prev(2, 2), 0.0));
+
+    Eigen::Matrix<double, 15, 15> pim_cov = pim->preintMeasCov();
+    // Convention: rows 0..2 attitude, 3..5 position, 6..8 velocity.
+    const double sigma_pim_yaw = std::sqrt(std::max(pim_cov(2, 2), 0.0));
+    const double sigma_pim_xy = std::sqrt(
+        0.5 * (std::max(pim_cov(3, 3), 0.0) +
+               std::max(pim_cov(4, 4), 0.0)));
+
+    const double sigma_pred_xy = std::sqrt(
+        sigma_marg_xy * sigma_marg_xy + sigma_pim_xy * sigma_pim_xy);
+    const double sigma_pred_yaw = std::sqrt(
+        sigma_marg_yaw * sigma_marg_yaw + sigma_pim_yaw * sigma_pim_yaw);
+
+    std::set<std::string> sensors_seen_this_step;
+    for (const auto& gk : gnss_keys) {
+      const int s = gk.sensor_idx;
+      const bool has_pos = d.gnssPosValid(s, t);
+      const bool has_yaw = d.gnssYawValid(s, t);
+
+      bool veto_pos = false;
+      if (trust_cfg.enable && (has_pos || has_yaw)) {
+        // Innovation against the IMU prediction (decoupled from the iSAM2
+        // linearization seed by construction since `pred` is built from the
+        // last smoothed state).
+        const double pred_x = pred.pose().x();
+        const double pred_y = pred.pose().y();
+        const double pred_yaw = pred.pose().rotation().rpy().z();
+
+        const bool robust_pos_on = (args.robust_pos != "none" &&
+                                    !args.robust_pos.empty());
+        const bool robust_yaw_on = (args.robust_yaw != "none" &&
+                                    !args.robust_yaw.empty());
+
+        if (has_pos) {
+          auto r = d.gnssPos(s, t);
+          double dx = r[0] - pred_x;
+          double dy = r[1] - pred_y;
+          double sx = std::sqrt(sigma_xy * sigma_xy +
+                                sigma_pred_xy * sigma_pred_xy);
+          double maha_pos = (dx * dx + dy * dy) / (sx * sx);
+          bool pos_bad;
+          if (robust_pos_on) {
+            double cutoff = args.robust_pos_k * trust_cfg.robust_k_mult;
+            pos_bad = std::sqrt(maha_pos) > cutoff;
+          } else {
+            pos_bad = maha_pos > trust_cfg.gnss_pos_thresh;
+          }
+          trust.update(gk.pos_key, !pos_bad);
+          sensors_seen_this_step.insert(gk.pos_key);
+          if (trust_cfg.gnss_veto && pos_bad) veto_pos = true;
+        }
+        if (has_yaw) {
+          double dtheta = wrapPi(d.gnssYaw(s, t) - pred_yaw);
+          double sth = std::sqrt(sigma_yaw * sigma_yaw +
+                                 sigma_pred_yaw * sigma_pred_yaw);
+          double whitened = std::abs(dtheta / sth);
+          bool yaw_bad;
+          if (robust_yaw_on) {
+            double cutoff = args.robust_yaw_k * trust_cfg.robust_k_mult;
+            yaw_bad = whitened > cutoff;
+          } else {
+            yaw_bad = (whitened * whitened) > trust_cfg.gnss_hdg_thresh;
+          }
+          trust.update(gk.hdg_key, !yaw_bad);
+          sensors_seen_this_step.insert(gk.hdg_key);
+        }
+      }
+
+      if (has_pos && !veto_pos) {
         auto r = d.gnssPos(s, t);
         graph.add(gtsam::GPSFactor(X(t),
                                    gtsam::Point3(r[0], r[1], r[2]),
-                                   gnss_pos_noise));
+                                   build_gnss_pos_noise(trust.get(gk.pos_key))));
       }
-      if (d.gnssYawValid(s, t)) {
+      if (has_yaw) {
         graph.add(parnav::CompassFactor<gtsam::Pose3>(
-            X(t), d.gnssYaw(s, t), gnss_yaw_noise));
+            X(t), d.gnssYaw(s, t),
+            build_gnss_yaw_noise(trust.get(gk.hdg_key))));
       }
+    }
+
+    // ---- Polar landmarks + shoreline ----
+    // Two parallel pathways per polar sensor:
+    //   - Marker detections (polar_marker) associate to known point landmarks
+    //     and add RangeFactor + MarkerAzimuthFactor against the matched marker.
+    //   - Shoreline detections (polar_shoreline) associate to the nearest
+    //     known shoreline segment and snap to the closest point on it; the
+    //     same RangeFactor + MarkerAzimuthFactor pair is then used against the
+    //     snapped point (treated as a "virtual marker").
+    // Per-sensor accept/reject counts from BOTH pathways are summed into a
+    // single per-step trust vote, matching the Python pipeline's one-vote-per
+    // -sensor convention.
+    if (args.use_landmarks) {
+      auto build_polar_noises = [&](const PolarSensor& ps) {
+        double scale = 1.0;
+        if (trust_cfg.enable) {
+          scale = parnav::trustScale(trust.get(ps.key), scale_cfg);
+        }
+        auto range_base = gtsam::noiseModel::Isotropic::Sigma(
+            1, scale * ps.sigma_range);
+        auto az_base = gtsam::noiseModel::Isotropic::Sigma(
+            1, scale * ps.sigma_az_rad);
+        return std::pair<gtsam::SharedNoiseModel, gtsam::SharedNoiseModel>{
+            wrapRobust(args.robust_polar, args.robust_polar_k, range_base),
+            wrapRobust(args.robust_polar, args.robust_polar_k, az_base)};
+      };
+
+      for (const auto& ps : polar_sensors) {
+        int n_total = 0;
+        int n_rejected = 0;
+
+        // Marker pathway.
+        if (d.n_markers > 0) {
+          for (int k = 0; k < d.kmax_polar_marker; ++k) {
+            if (!d.polarMarkerValid(ps.sensor_idx, t, k)) continue;
+            auto rd = d.polarMarkerReading(ps.sensor_idx, t, k);
+            const double range_m = rd[0];
+            const double az_rad = rd[1];
+            ++n_total;
+
+            parnav::AssocResult ar = parnav::associateMarker(
+                pred.pose(), ps.yaw_offset_rad, range_m, az_rad,
+                ps.sigma_range, ps.sigma_az_rad, d.markers, d.n_markers,
+                args.assoc_gate_chi2);
+            if (ar.marker_idx < 0) {
+              ++n_rejected;
+              continue;
+            }
+            auto [range_noise, az_noise] = build_polar_noises(ps);
+            graph.add(parnav::RangeFactor<gtsam::Pose3>(
+                X(t), range_noise, range_m, ar.marker_world));
+            graph.add(parnav::MarkerAzimuthFactor<gtsam::Pose3>(
+                X(t), az_noise, az_rad, ar.marker_world, ps.yaw_offset_rad));
+          }
+        }
+
+        // Shoreline pathway.
+        if (d.n_shoreline > 0) {
+          for (int k = 0; k < d.kmax_polar_shoreline; ++k) {
+            if (!d.polarShorelineValid(ps.sensor_idx, t, k)) continue;
+            auto rd = d.polarShorelineReading(ps.sensor_idx, t, k);
+            const double range_m = rd[0];
+            const double az_rad = rd[1];
+            ++n_total;
+
+            parnav::AssocResult ar = parnav::associateShoreline(
+                pred.pose(), ps.yaw_offset_rad, range_m, az_rad,
+                ps.sigma_range, ps.sigma_az_rad, d.shoreline, d.n_shoreline,
+                args.assoc_gate_chi2);
+            if (ar.marker_idx < 0) {
+              ++n_rejected;
+              continue;
+            }
+            auto [range_noise, az_noise] = build_polar_noises(ps);
+            graph.add(parnav::RangeFactor<gtsam::Pose3>(
+                X(t), range_noise, range_m, ar.marker_world));
+            graph.add(parnav::MarkerAzimuthFactor<gtsam::Pose3>(
+                X(t), az_noise, az_rad, ar.marker_world, ps.yaw_offset_rad));
+          }
+        }
+
+        if (trust_cfg.enable && n_total > 0) {
+          const double bad_ratio = static_cast<double>(n_rejected) / n_total;
+          const bool is_bad = bad_ratio >= trust_cfg.gate_bad_ratio;
+          trust.update(ps.key, !is_bad);
+          sensors_seen_this_step.insert(ps.key);
+        }
+      }
+    }
+
+    // Decay forgetting for known sensors that didn't fire this step so trust
+    // drifts back toward the prior.
+    if (trust_cfg.enable) {
+      for (const auto& gk : gnss_keys) {
+        if (!sensors_seen_this_step.count(gk.pos_key)) trust.decay(gk.pos_key);
+        if (!sensors_seen_this_step.count(gk.hdg_key)) trust.decay(gk.hdg_key);
+      }
+      for (const auto& ps : polar_sensors) {
+        if (!sensors_seen_this_step.count(ps.key)) trust.decay(ps.key);
+      }
+      trust.record();
     }
 
     timestamps[X(t)] = d.time[t];
@@ -298,5 +608,28 @@ int main(int argc, char** argv) {
   out.close();
   std::printf("Wrote %s (T=%d, ship=%d, lag=%.2fs)\n",
               args.out_csv.c_str(), T, ship, args.lag);
+
+  if (trust_cfg.enable) {
+    std::string trust_path = args.trust_csv;
+    if (trust_path.empty()) {
+      // Default: <out_csv stem>_trust.csv
+      auto dot = args.out_csv.find_last_of('.');
+      trust_path = (dot == std::string::npos)
+                       ? args.out_csv + "_trust.csv"
+                       : args.out_csv.substr(0, dot) + "_trust.csv";
+    }
+    std::ofstream tout(trust_path);
+    tout << "t,sensor,trust\n";
+    const auto& hist = trust.history();
+    for (std::size_t k = 0; k < hist.size(); ++k) {
+      const double tk = d.time[k + 1];  // history starts at first stepped t
+      for (const auto& kv : hist[k]) {
+        tout << tk << ',' << kv.first << ',' << kv.second << '\n';
+      }
+    }
+    tout.close();
+    std::printf("Wrote %s (trust history, %zu steps)\n", trust_path.c_str(),
+                hist.size());
+  }
   return 0;
 }
