@@ -51,7 +51,7 @@
 #include <vector>
 
 #include "AzimuthFactor.hpp"
-#include "BaroFactor.hpp"
+#include "BaroFactorKnownPoint.hpp"
 #include "CompassFactor.hpp"
 #include "ElevationFactor.hpp"
 #include "ExtendedPoseAttitudeFactor.hpp"
@@ -64,7 +64,6 @@ using parnav::rad2deg;
 using parnav::ssa;
 
 using gtsam::symbol_shorthand::B;
-using gtsam::symbol_shorthand::D;  // baro bias
 using gtsam::symbol_shorthand::V;
 using gtsam::symbol_shorthand::X;
 
@@ -108,21 +107,17 @@ struct Options {
   // the residual stays bounded. Replace with the surveyed/known field height
   // for each campaign (legacy default 271.7171 was specific to a prior site).
   double baro_origin_msl = 271.8671 - 0.15;
-  // Sigma [m] on baro bias prior. The bias state should only soak up real
-  // sensor drift now that p0 is calibrated separately.
-  double baro_bias_sigma = 1.0;
   // Local sea-level reference pressure [kPa]. The 101.29 standard only holds
   // on a standard day; on any other day this must be calibrated to the local
   // QFF/QNH. Negative means "auto-calibrate from the static window using
   // baro_origin_msl as the truth altitude" (default).
   double baro_p0_kpa = -1.0;
   // Measurement-noise sigma [m] on the BaroFactor.
-  double baro_sigma = 1.0;
-  // Random-walk sigma [m/step] on the baro bias chain. The old MEKF used a
-  // single static bias variable (effectively zero process noise); a tight
-  // value here approximates that, but too tight welds the chain so it cannot
-  // slacken at handover.
-  double baro_bias_rw_sigma = 1e-3;
+  double baro_sigma = 3.0;
+  // Ground-level air temperature [C], used to set the sea-level reference
+  // T0 that drives dh/dp in the hypsometric formula. Standard day is 15;
+  // cold days compress dh/dp linearly with T0.
+  double ground_temp_c = 15.0;
   // Override the handover switch time (seconds). <0 means use the default
   // baked into handover_cfg() for the chosen --handover.
   double switch_time = -1.0;
@@ -165,8 +160,6 @@ void print_usage(const char* prog) {
          "inside\n"
       << "                              BaroFactor (default 271.7171, set to "
          "field height)\n"
-      << "  --baro-bias-sigma <m>       sigma [m] of baro-bias prior "
-         "(default 1.0)\n"
       << "  --baro-p0-kpa <v>           local sea-level reference pressure "
          "[kPa]\n"
       << "                              (default: auto-calibrate from static "
@@ -174,9 +167,8 @@ void print_usage(const char* prog) {
       << "                              against --baro-origin-msl)\n"
       << "  --baro-sigma <m>            BaroFactor measurement sigma "
          "(default 1.0)\n"
-      << "  --baro-bias-rw-sigma <m>    baro-bias random-walk sigma per "
-         "correction\n"
-      << "                              (default 1e-3)\n"
+      << "  --ground-temp-c <C>         ground-level air temperature [C];\n"
+      << "                              sets T0_K (default 15 = std day)\n"
       << "  --switch-time <s>           override handover switch time "
          "[seconds]\n"
       << "  -h, --help\n";
@@ -289,18 +281,15 @@ bool parse_args(int argc, char** argv, Options& o) {
     } else if (a == "--baro-origin-msl") {
       if (!need(i, "--baro-origin-msl")) return false;
       o.baro_origin_msl = std::stod(argv[++i]);
-    } else if (a == "--baro-bias-sigma") {
-      if (!need(i, "--baro-bias-sigma")) return false;
-      o.baro_bias_sigma = std::stod(argv[++i]);
     } else if (a == "--baro-p0-kpa") {
       if (!need(i, "--baro-p0-kpa")) return false;
       o.baro_p0_kpa = std::stod(argv[++i]);
     } else if (a == "--baro-sigma") {
       if (!need(i, "--baro-sigma")) return false;
       o.baro_sigma = std::stod(argv[++i]);
-    } else if (a == "--baro-bias-rw-sigma") {
-      if (!need(i, "--baro-bias-rw-sigma")) return false;
-      o.baro_bias_rw_sigma = std::stod(argv[++i]);
+    } else if (a == "--ground-temp-c") {
+      if (!need(i, "--ground-temp-c")) return false;
+      o.ground_temp_c = std::stod(argv[++i]);
     } else if (a == "--switch-time") {
       if (!need(i, "--switch-time")) return false;
       o.switch_time = std::stod(argv[++i]);
@@ -579,7 +568,6 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
   const double A_acc_bias = (50.0 * g0 / 1000.0);
   const double A_gyro_bias = deg2rad(360.0 / 3600.0);
   // const double A_gyro_bias = deg2rad(360.0 / 3600.0);
-  const double A_baro_bias = opts.baro_bias_sigma;
 
   BIAS prior_bias;
   if constexpr (std::is_same_v<BIAS, gtsam::imuBias::GaussMarkovBias>) {
@@ -591,7 +579,6 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
       (gtsam::Vector(6) << A_acc_bias, A_acc_bias, A_acc_bias, A_gyro_bias,
        A_gyro_bias, A_gyro_bias)
           .finished());
-  auto baro_bias_noise = gtsam::noiseModel::Isotropic::Sigma(1, A_baro_bias);
 
   // --- Smoother setup ---
   gtsam::ISAM2Params isam_params;
@@ -630,37 +617,46 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
   values.insert(B(0), prior_bias);
   timestamps[B(0)] = 0.0;
   double baro_p0 = (opts.baro_p0_kpa > 0.0) ? opts.baro_p0_kpa : 101.29;
+  const double baro_T0_K =
+      parnav::BaroFactorKnownPoint<PoseParam>::T0_from_ground_temp_c(
+          opts.ground_temp_c, opts.baro_origin_msl);
   if (use_baro) {
     // Auto-calibrate p0 from the static window: average the first ~40 s of
     // valid baro samples and solve for the local sea-level reference such
-    // that height_from_pressure(p_avg, p0) == baro_origin_msl.
+    // that height_from_pressure(p_avg, p0, T0_K) == baro_origin_msl. No
+    // live baro-bias state is created -- BaroFactorKnownPoint handles the
+    // sensor bias as a fixed offset (here zero, since p0 is calibrated).
+    // Use only the [20 s, 40 s) slice. The first ~20 s of the dune
+    // pressure log carries a sub-sampled startup transient that biases
+    // p_avg low by ~3 m of altitude; by 20 s the sensor has settled.
+    // The window still ends before the 40 s baro fire gate so the
+    // calibration and live samples remain non-overlapping.
     double p_sum = 0.0;
     int p_n = 0;
     for (size_t k = 0; k < d.t.size() && d.t[k] - d.t[0] < 40.0; ++k) {
-      if (d.baro_idx[k] != 0) {
+      if (d.baro_idx[k] != 0 && d.t[k] - d.t[0] >= 20.0) {
         p_sum += d.z_baro[k];
         ++p_n;
       }
     }
     if (opts.baro_p0_kpa > 0.0) {
-      printf("Baro init:   p0=%.3f kPa (manual)\n", baro_p0);
+      printf("Baro init:   p0=%.3f kPa (manual), T0=%.2f K\n", baro_p0,
+             baro_T0_K);
     } else if (p_n > 0) {
       const double p_avg = p_sum / p_n;
-      baro_p0 = parnav::BaroFactor<PoseParam>::p0_from_known_altitude(
-          p_avg, opts.baro_origin_msl);
+      baro_p0 = parnav::BaroFactorKnownPoint<PoseParam>::p0_from_known_altitude(
+          p_avg, opts.baro_origin_msl, baro_T0_K);
       printf(
-          "Baro init:   p_avg=%.3f kPa over %d samples, origin=%.2f m -> "
-          "p0=%.3f kPa\n",
-          p_avg, p_n, opts.baro_origin_msl, baro_p0);
+          "Baro init:   p_avg=%.3f kPa over %d samples, origin=%.2f m, "
+          "T_ground=%.1f C -> T0=%.2f K, p0_local=%.3f kPa\n",
+          p_avg, p_n, opts.baro_origin_msl, opts.ground_temp_c, baro_T0_K,
+          baro_p0);
     } else {
-      printf("Baro init:   no static-window samples; p0=%.3f kPa (standard)\n",
-             baro_p0);
+      printf(
+          "Baro init:   no static-window samples; p0=%.3f kPa, T0=%.2f K "
+          "(standard)\n",
+          baro_p0, baro_T0_K);
     }
-    // Bias prior centred at 0; with a calibrated p0 the bias only needs to
-    // soak up real sensor drift.
-    graph.addPrior<double>(D(0), 0.0, baro_bias_noise);
-    values.insert(D(0), 0.0);
-    timestamps[D(0)] = 0.0;
   }
   smoother.update(graph, values, timestamps);
 
@@ -676,7 +672,6 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
       return gtsam::NavState(gtsam::Pose3(R0, p0), v0);
   }();
   BIAS prev_bias = prior_bias;
-  double prev_baro_bias = 0.0;
 
   // Result storage
   std::vector<gtsam::Rot3> est_R{R0};
@@ -684,7 +679,6 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
   std::vector<Eigen::Vector3d> est_v{v0};
   std::vector<Eigen::Vector3d> est_ba{prior_bias.accelerometer()};
   std::vector<Eigen::Vector3d> est_bg{prior_bias.gyroscope()};
-  std::vector<double> est_baro_bias{0.0};
   std::vector<Eigen::Vector3d> pos_sigma{Eigen::Vector3d::Zero()};
   std::vector<Eigen::Vector3d> vel_sigma{Eigen::Vector3d::Zero()};
   std::vector<Eigen::Vector3d> att_sigma{Eigen::Vector3d::Zero()};
@@ -776,7 +770,7 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
 
     const bool before_handover = accumulated_time < hcfg.switch_time;
     const bool baro_tick =
-        use_baro && d.baro_idx[idx] != 0 && accumulated_time >= 20.0;
+        use_baro && d.baro_idx[idx] != 0 && accumulated_time >= 40.0;
     // IFAC WC 2026: split MB (position/RTK) and rover (baseline/attitude)
     // gates so the attitude factor only fires on IMU ticks where a rover
     // compass measurement is actually available. Previously both shared
@@ -813,7 +807,6 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
       est_v.push_back(v_pred);
       est_ba.push_back(prev_bias.accelerometer());
       est_bg.push_back(prev_bias.gyroscope());
-      est_baro_bias.push_back(prev_baro_bias);
       // Between updates we don't recompute marginals; carry the last-known
       // sigma forward (approx OK for plotting — the update overwrites it).
       pos_sigma.push_back(pos_sigma.back());
@@ -862,14 +855,6 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
       timestamps[B(correction_count)] = t_now;
     }
 
-    // --- Baro bias: single static state D(0) for the whole run.
-    // Refresh its timestamp every correction so the fixed-lag smoother does
-    // not marginalize it out. This matches the old MEKF (one bias variable,
-    // zero process noise).
-    if (use_baro) {
-      timestamps[D(0)] = t_now;
-    }
-
     // --- Aiding factors ---
     if (pre_tick) {
       // GPS position factor -- gated on the MB (RTK) index only.
@@ -901,9 +886,9 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
         }
       }
       if (baro_tick) {
-        graph.add(parnav::BaroFactor<PoseParam>(X(correction_count), D(0),
-                                                d.z_baro[idx], baro_noise,
-                                                opts.baro_origin_msl, baro_p0));
+        graph.add(parnav::BaroFactorKnownPoint<PoseParam>(
+            X(correction_count), d.z_baro[idx], /*p_bias=*/0.0, baro_noise,
+            opts.baro_origin_msl, baro_p0, baro_T0_K));
       }
     } else if (post_tick) {
       if (d.bt_meas_idx[idx] != 0) {
@@ -928,9 +913,9 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
       }
 
       if (baro_tick) {
-        graph.add(parnav::BaroFactor<PoseParam>(X(correction_count), D(0),
-                                                d.z_baro[idx], baro_noise,
-                                                opts.baro_origin_msl, baro_p0));
+        graph.add(parnav::BaroFactorKnownPoint<PoseParam>(
+            X(correction_count), d.z_baro[idx], /*p_bias=*/0.0, baro_noise,
+            opts.baro_origin_msl, baro_p0, baro_T0_K));
       }
     }
 
@@ -957,7 +942,6 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
       v_est = vel;
     }
     prev_bias = result.at<BIAS>(B(correction_count));
-    if (use_baro) prev_baro_bias = result.at<double>(D(0));
 
     preintegrated->resetIntegrationAndSetBias(prev_bias);
 
@@ -967,7 +951,6 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
     est_v.back() = v_est;
     est_ba.back() = prev_bias.accelerometer();
     est_bg.back() = prev_bias.gyroscope();
-    est_baro_bias.back() = prev_baro_bias;
 
     // Marginal sigmas
     Eigen::Vector3d sp = Eigen::Vector3d::Zero();
@@ -1069,7 +1052,6 @@ void run_estimation(const MultirotorData& d, const Options& opts) {
   write_vec3(pre + "pos_std.csv", pos_sigma);
   write_vec3(pre + "vel_std.csv", vel_sigma);
   write_vec3(pre + "att_std.csv", att_sigma);
-  if (use_baro) write_scalar(pre + "baro.csv", est_baro_bias);
   printf("Saved results to %s*\n", pre.c_str());
 }
 
@@ -1105,10 +1087,9 @@ int main(int argc, char** argv) {
   printf("Handover:    %s\n", ho_tag);
   printf("Robust:      %s (k=%.4f)\n", rb_tag, opts.robust_threshold);
   printf(
-      "Baro:        origin_msl=%.2f m, sigma=%.2f m, bias_sigma=%.2f m, "
-      "rw_sigma=%.0e m, p0=%s\n",
-      opts.baro_origin_msl, opts.baro_sigma, opts.baro_bias_sigma,
-      opts.baro_bias_rw_sigma, opts.baro_p0_kpa > 0.0 ? "manual" : "auto");
+      "Baro:        origin_msl=%.2f m, sigma=%.2f m, T_ground=%.1f C, p0=%s\n",
+      opts.baro_origin_msl, opts.baro_sigma, opts.ground_temp_c,
+      opts.baro_p0_kpa > 0.0 ? "manual" : "auto");
 
   auto data = parse_multirotor_csv(opts.input_file);
   if (!data) return 1;

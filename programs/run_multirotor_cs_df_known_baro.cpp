@@ -1,9 +1,12 @@
 /**
- * @file run_multirotor_cs_df.cpp
- * @brief Fixed-lag smoother port of ins_fgo/programs/run_multirotor_cs_df.cpp,
- *        rewritten in the IFAC WC 2026 style (raw GTSAM factors, no parnav
- *        Parsers, and the pressure-based parnav::BaroFactor with origin_msl
- *        and p0 calibration).
+ * @file run_multirotor_cs_df_known_baro.cpp
+ * @brief Copy of run_multirotor_cs_df.cpp wired to use the "Known Point"
+ *        barometer factor (parnav::BaroFactorKnownPoint). Strategy B from
+ *        the field-setup notes: during the first 100 s of static-on-ground
+ *        data we compute a fixed pressure bias from the average measured
+ *        pressure and the known altitude (`--baro-origin-msl`), then every
+ *        baro factor subtracts that bias before mapping pressure to height.
+ *        No live `D(0)` baro-bias state is created or estimated.
  *
  * Paths and data layout are unchanged:
  *   <base>/{time,imu,rtk,df,cs,baro,uwb1..5}.csv
@@ -47,7 +50,7 @@
 #include <vector>
 
 #include "AzimuthFactor.hpp"
-#include "BaroFactor.hpp"
+#include "BaroFactorKnownPoint.hpp"
 #include "ElevationFactor.hpp"
 #include "RangeFactor.hpp"
 #include "utils.hpp"
@@ -56,7 +59,6 @@ using parnav::deg2rad;
 using parnav::rad2deg;
 
 using gtsam::symbol_shorthand::B;
-using gtsam::symbol_shorthand::D;
 using gtsam::symbol_shorthand::V;
 using gtsam::symbol_shorthand::X;
 
@@ -82,12 +84,12 @@ struct Options {
 
   // Baro
   double baro_origin_msl = 0.0;  // dataset origin altitude; override per run
-  double baro_p0_kpa = -1.0;     // auto-calibrate when <0
-  double baro_bias_sigma = 1.0;
-  double baro_sigma = 1.0;
-  // Ground-level air temperature in °C; drives T0_K used by heightOut.
-  // Defaults to 15 (standard day). Cold-day flights need this to recover
-  // the actual dh/dp slope.
+  double baro_p0_kpa = -1.0;     // standard p0 when <0 (no online calibration)
+  double baro_sigma = 3.0;
+  // Ground-level air temperature in °C, used to set the sea-level
+  // reference temperature `T0_K` that drives `dh/dp` in the hypsometric
+  // formula. Standard atmosphere is 15 °C; cold days (-8 to -15 °C on
+  // your test) compress `dh/dp` by ~8 % and bias the altitude estimate.
   double ground_temp_c = 15.0;
   // If true, the baro residual is wrapped in the same robust kernel as the
   // PARS / UWB factors. Default is true: baro joins BLE and UWB under the
@@ -116,7 +118,6 @@ static void print_usage(const char* prog) {
       << "  --output-prefix <str>\n"
       << "  --baro-origin-msl <m>\n"
       << "  --baro-p0-kpa <v>           (negative -> auto-calibrate)\n"
-      << "  --baro-bias-sigma <m>\n"
       << "  --baro-sigma <m>\n"
       << "  --ground-temp-c <C>         sea-level T0 follows from ground\n"
       << "                              temperature (default 15 = std day)\n"
@@ -205,9 +206,6 @@ static bool parse_args(int argc, char** argv, Options& o) {
     } else if (a == "--baro-p0-kpa") {
       if (!need(i, "--baro-p0-kpa")) return false;
       o.baro_p0_kpa = std::stod(argv[++i]);
-    } else if (a == "--baro-bias-sigma") {
-      if (!need(i, "--baro-bias-sigma")) return false;
-      o.baro_bias_sigma = std::stod(argv[++i]);
     } else if (a == "--baro-sigma") {
       if (!need(i, "--baro-sigma")) return false;
       o.baro_sigma = std::stod(argv[++i]);
@@ -469,8 +467,6 @@ void run_estimation(const Data& d, const Options& opts) {
       gtsam::noiseModel::Diagonal::Variances(R_GNSS_pos.diagonal());
 
   auto baro_base = gtsam::noiseModel::Isotropic::Sigma(1, opts.baro_sigma);
-  auto baro_bias_noise =
-      gtsam::noiseModel::Isotropic::Sigma(1, opts.baro_bias_sigma);
 
   // PARS / BT noise (original: 5 deg az/el, 1.5 m range; here we keep 2.5 m
   // range to match ifac defaults — overridable via robust threshold logic).
@@ -518,12 +514,12 @@ void run_estimation(const Data& d, const Options& opts) {
       gtsam::Point3(0.000, -23.243, 0.233)};
 
   // --- Initial state ---
-  gtsam::Rot3 R0 = gtsam::Rot3::Identity();
+  gtsam::Rot3 R0 = gtsam::Rot3::Rz(deg2rad(9.0));
   gtsam::Point3 p0 = gtsam::Point3::Zero();
   gtsam::Vector3 v0 = gtsam::Vector3::Zero();
-  const double A_pos = 2.5, A_vel = 0.5, A_att_rp = deg2rad(180.0);
+  const double A_pos = 2.5, A_vel = 0.5, A_att_rp = deg2rad(25.0);
   const double A_pos_z = 5.0;
-  const double A_yaw = deg2rad(180.0);
+  const double A_yaw = deg2rad(150.0);
   const double A_acc_bias = 0.1;
   const double A_gyro_bias = deg2rad(0.5);
 
@@ -567,12 +563,19 @@ void run_estimation(const Data& d, const Options& opts) {
   const bool use_uwb_mode = (opts.handover == Handover::Uwb);
   const bool use_baro_mode = (opts.handover == Handover::AngleBaro);
 
-  // Auto-calibrate baro p0 from the first 100 s of data, when the drone is
-  // assumed to be on the ground and the static assumption holds. Baro
-  // measurements themselves fire from t0 onwards.
+  // Known-point calibration with LOCAL p0. Strategy B's slope error at
+  // sites where local sea-level pressure differs from 101.29 kPa is fixed
+  // by solving for the local p0 instead of subtracting an offset and
+  // keeping std p0. With p0_local chosen so heightOut(p_avg, p0_local) ==
+  // baro_origin_msl, the factor is fed (pressure_kPa - 0) so p_bias stays
+  // zero, and the resulting altitude tracks the local atmosphere slope.
   double baro_p0 = (opts.baro_p0_kpa > 0.0) ? opts.baro_p0_kpa : 101.29;
-  const double baro_T0_K = parnav::BaroFactor<PoseParam>::T0_from_ground_temp_c(
-      opts.ground_temp_c, opts.baro_origin_msl);
+  // Sea-level reference temperature [K] inferred from ground-temperature
+  // input (cold-day flights need this to get the right dh/dp slope).
+  const double baro_T0_K =
+      parnav::BaroFactorKnownPoint<PoseParam>::T0_from_ground_temp_c(
+          opts.ground_temp_c, opts.baro_origin_msl);
+  const double baro_p_bias = 0.0;
   if (use_baro_mode) {
     double p_sum = 0.0;
     int p_n = 0;
@@ -584,20 +587,19 @@ void run_estimation(const Data& d, const Options& opts) {
     }
     if (opts.baro_p0_kpa <= 0.0 && p_n > 0) {
       const double p_avg = p_sum / p_n;
-      baro_p0 = parnav::BaroFactor<PoseParam>::p0_from_known_altitude(
+      baro_p0 = parnav::BaroFactorKnownPoint<PoseParam>::p0_from_known_altitude(
           p_avg, opts.baro_origin_msl, baro_T0_K);
       printf(
           "Baro init: p_avg=%.3f kPa over %d samples, origin=%.2f m, "
-          "T_ground=%.1f C -> T0=%.2f K, p0_local=%.3f kPa\n",
+          "T_ground=%.1f C -> T0=%.2f K, p0_local=%.3f kPa (p_bias=0)\n",
           p_avg, p_n, opts.baro_origin_msl, opts.ground_temp_c, baro_T0_K,
           baro_p0);
     } else {
-      printf("Baro init: p0=%.3f kPa (manual or no samples), T0=%.2f K\n",
-             baro_p0, baro_T0_K);
+      printf(
+          "Baro init: p0=%.3f kPa (manual or no samples), T0=%.2f K, "
+          "p_bias=0\n",
+          baro_p0, baro_T0_K);
     }
-    graph.addPrior<double>(D(0), 0.0, baro_bias_noise);
-    values.insert(D(0), 0.0);
-    timestamps[D(0)] = 0.0;
   }
 
   smoother.update(graph, values, timestamps);
@@ -606,14 +608,12 @@ void run_estimation(const Data& d, const Options& opts) {
   auto preintegrated = std::make_shared<PIM>(p, prior_bias);
   gtsam::NavState prev_state(gtsam::Pose3(R0, p0), v0);
   BiasT prev_bias = prior_bias;
-  double prev_baro_bias = 0.0;
 
   std::vector<gtsam::Rot3> est_R{R0};
   std::vector<Eigen::Vector3d> est_p{p0};
   std::vector<Eigen::Vector3d> est_v{v0};
   std::vector<Eigen::Vector3d> est_ba{prior_bias.accelerometer()};
   std::vector<Eigen::Vector3d> est_bg{prior_bias.gyroscope()};
-  std::vector<double> est_baro_bias{0.0};
   std::vector<Eigen::Vector3d> pos_sigma{Eigen::Vector3d::Zero()};
   std::vector<Eigen::Vector3d> vel_sigma{Eigen::Vector3d::Zero()};
   std::vector<Eigen::Vector3d> att_sigma{Eigen::Vector3d::Zero()};
@@ -693,7 +693,6 @@ void run_estimation(const Data& d, const Options& opts) {
         est_v.push_back(prop.v());
         est_ba.push_back(prev_bias.accelerometer());
         est_bg.push_back(prev_bias.gyroscope());
-        est_baro_bias.push_back(prev_baro_bias);
         Eigen::Vector3d ps, vs, as;
         propagated_sigmas(ps, vs, as);
         pos_sigma.push_back(ps);
@@ -719,7 +718,6 @@ void run_estimation(const Data& d, const Options& opts) {
       timestamps[X(correction_count)] = t_now;
       timestamps[V(correction_count)] = t_now;
       timestamps[B(correction_count)] = t_now;
-      if (use_baro_mode) timestamps[D(0)] = t_now;
 
       if (use_gnss) {
         graph.add(
@@ -757,11 +755,11 @@ void run_estimation(const Data& d, const Options& opts) {
         }
       }
       if (use_baro) {
-        graph.add(parnav::BaroFactor<PoseParam>(
-            X(correction_count), D(0), d.z_baro[idx], baro_noise,
+        graph.add(parnav::BaroFactorKnownPoint<PoseParam>(
+            X(correction_count), d.z_baro[idx], baro_p_bias, baro_noise,
             opts.baro_origin_msl, baro_p0, baro_T0_K));
-        printf("[t=%.3f c=%d] +Baro p=%.3f kPa (T0=%.2f K)\n", t_now,
-               correction_count, d.z_baro[idx], baro_T0_K);
+        printf("[t=%.3f c=%d] +Baro p=%.3f kPa (p_bias=%.4f kPa, T0=%.2f K)\n",
+               t_now, correction_count, d.z_baro[idx], baro_p_bias, baro_T0_K);
       }
 
       printf("[t=%.3f c=%d] optimize\n", t_now, correction_count);
@@ -772,7 +770,6 @@ void run_estimation(const Data& d, const Options& opts) {
       auto vel = result.at<gtsam::Vector3>(V(correction_count));
       prev_state = gtsam::NavState(pose, vel);
       prev_bias = result.at<BiasT>(B(correction_count));
-      if (use_baro_mode) prev_baro_bias = result.at<double>(D(0));
       preintegrated->resetIntegrationAndSetBias(prev_bias);
 
       est_R.push_back(pose.rotation());
@@ -780,7 +777,6 @@ void run_estimation(const Data& d, const Options& opts) {
       est_v.push_back(vel);
       est_ba.push_back(prev_bias.accelerometer());
       est_bg.push_back(prev_bias.gyroscope());
-      est_baro_bias.push_back(prev_baro_bias);
 
       Eigen::Vector3d sp = Eigen::Vector3d::Zero();
       Eigen::Vector3d sv = Eigen::Vector3d::Zero();
@@ -821,7 +817,6 @@ void run_estimation(const Data& d, const Options& opts) {
       est_v.push_back(prop.v());
       est_ba.push_back(prev_bias.accelerometer());
       est_bg.push_back(prev_bias.gyroscope());
-      est_baro_bias.push_back(prev_baro_bias);
       Eigen::Vector3d ps, vs, as;
       propagated_sigmas(ps, vs, as);
       pos_sigma.push_back(ps);
@@ -844,7 +839,6 @@ void run_estimation(const Data& d, const Options& opts) {
       est_v.push_back(est_v.back());
       est_ba.push_back(est_ba.back());
       est_bg.push_back(est_bg.back());
-      est_baro_bias.push_back(est_baro_bias.back());
       pos_sigma.push_back(pos_sigma.back());
       vel_sigma.push_back(vel_sigma.back());
       att_sigma.push_back(att_sigma.back());
@@ -872,7 +866,6 @@ void run_estimation(const Data& d, const Options& opts) {
   write_vec3(pre + "pos_std.csv", pos_sigma);
   write_vec3(pre + "vel_std.csv", vel_sigma);
   write_vec3(pre + "att_std.csv", att_sigma);
-  if (use_baro_mode) write_scalar(pre + "baro.csv", est_baro_bias);
   printf("Saved outputs to %s*\n", pre.c_str());
 }
 
