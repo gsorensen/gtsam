@@ -59,9 +59,16 @@ struct Args {
   double robust_pos_k = 1.345;
   std::string robust_yaw = "none";
   double robust_yaw_k = 1.345;
-  std::string robust_polar = "none";
+  std::string robust_polar = "gmc";  // default: robustify marker factors.
+                                     // Mis-associations/jamming produce outlier
+                                     // detections; GMC downweights them so good
+                                     // markers still anchor pose (critical during
+                                     // GNSS blackout). --robust-polar none to off.
   double robust_polar_k = 1.345;
   int use_landmarks = 1;              // 1 on (default), 0 off
+  int use_shoreline = 0;              // 0 off (default): shoreline association
+                                      // is weak and corrupts yaw; opt in with
+                                      // --shoreline once the frontend is fixed.
   double assoc_gate_chi2 = 5.99;      // 2-DoF χ² @ 95%
   // Trust overrides (sentinel: empty / NaN means "use sidecar value")
   int trust_enable = -1;              // -1 keep, 0 force off, 1 force on
@@ -109,6 +116,8 @@ Args parseArgs(int argc, char** argv) {
     else if (k == "--robust-polar-k") a.robust_polar_k = std::stod(next());
     else if (k == "--no-landmarks") a.use_landmarks = 0;
     else if (k == "--landmarks") a.use_landmarks = 1;
+    else if (k == "--no-shoreline") a.use_shoreline = 0;
+    else if (k == "--shoreline") a.use_shoreline = 1;
     else if (k == "--assoc-gate-chi2") a.assoc_gate_chi2 = std::stod(next());
     else if (k == "-h" || k == "--help") {
       std::cout
@@ -121,7 +130,8 @@ Args parseArgs(int argc, char** argv) {
           << "  [--trust-floor F] [--trust-alpha1 A] [--trust-alpha2 A]\n"
           << "  [--trust-gnss-pos-thresh CHI2] [--trust-gnss-hdg-thresh CHI2]\n"
           << "  [--trust-robust-k-mult K] [--trust-gnss-veto | --no-trust-gnss-veto]\n"
-          << "  [--landmarks | --no-landmarks] [--assoc-gate-chi2 5.99]\n"
+          << "  [--landmarks | --no-landmarks] [--shoreline | --no-shoreline]\n"
+          << "  [--assoc-gate-chi2 5.99]\n"
           << "  [--robust-polar none|huber|tukey|gmc] [--robust-polar-k K]\n";
       std::exit(0);
     } else {
@@ -146,11 +156,6 @@ gtsam::SharedNoiseModel wrapRobust(const std::string& kind, double k,
   throw std::runtime_error("unknown robust kernel: " + kind);
 }
 
-gtsam::Pose3 poseFromGt(const parnav::SimData3D& d, int ship, int t) {
-  auto p = d.gtPose(ship, t);
-  gtsam::Rot3 R = gtsam::Rot3::Quaternion(p[3], p[4], p[5], p[6]);
-  return gtsam::Pose3(R, gtsam::Point3(p[0], p[1], p[2]));
-}
 
 double wrapPi(double a) {
   constexpr double pi = 3.14159265358979323846;
@@ -273,9 +278,14 @@ int main(int argc, char** argv) {
       (gtsam::Vector(6) << sig_planar, sig_planar, sig_loose,
        sig_loose, sig_loose, sig_planar).finished());
 
-  // Initial-state prior (tight on truth at k=0).
-  auto pose_prior_noise = gtsam::noiseModel::Isotropic::Sigma(6, 1e-3);
-  auto vel_prior_noise = gtsam::noiseModel::Isotropic::Sigma(3, 1e-3);
+  // Initial-state prior. GT never enters the FGO: pose0 is seeded from the
+  // first GNSS fix, so the position/yaw prior is set at GNSS confidence while
+  // (z, roll, pitch) stay pinned to the planar manifold. Velocity is a rough
+  // first-difference of GNSS, kept loose so it does not over-constrain.
+  auto pose_prior_noise = gtsam::noiseModel::Diagonal::Sigmas(
+      (gtsam::Vector(6) << 1e-3, 1e-3, sigma_yaw, sigma_xy, sigma_xy, 1e-3)
+          .finished());
+  auto vel_prior_noise = gtsam::noiseModel::Isotropic::Sigma(3, 2.0);
   auto bias_prior_noise = gtsam::noiseModel::Isotropic::Sigma(6, 1e-3);
 
   // ---- IMU preintegration params ----
@@ -302,10 +312,31 @@ int main(int argc, char** argv) {
   gtsam::Values values;
   gtsam::FixedLagSmoother::KeyTimestampMap timestamps;
 
-  // ---- t=0: priors + ground-truth initialization ----
-  gtsam::Pose3 pose0 = poseFromGt(d, ship, 0);
-  auto v0_eig = d.gtVel(ship, 0);
-  gtsam::Vector3 v0(v0_eig[0], v0_eig[1], v0_eig[2]);
+  // ---- t=0: priors + GNSS-derived initialization (no GT in the FGO) ----
+  const int s0 = gnss_keys.empty() ? -1 : gnss_keys.front().sensor_idx;
+  double x0 = 0.0, y0 = 0.0, yaw0 = 0.0;
+  if (s0 >= 0) {
+    for (int t = 0; t < T; ++t)
+      if (d.gnssPosValid(s0, t)) { auto r = d.gnssPos(s0, t); x0 = r[0]; y0 = r[1]; break; }
+    for (int t = 0; t < T; ++t)
+      if (d.gnssYawValid(s0, t)) { yaw0 = d.gnssYaw(s0, t); break; }
+  }
+  gtsam::Pose3 pose0(gtsam::Rot3::Yaw(yaw0), gtsam::Point3(x0, y0, 0.0));
+
+  // Velocity seed: first-difference of the first two valid GNSS fixes.
+  gtsam::Vector3 v0(0.0, 0.0, 0.0);
+  if (s0 >= 0) {
+    int ta = -1, tb = -1;
+    for (int t = 0; t < T; ++t)
+      if (d.gnssPosValid(s0, t)) { if (ta < 0) ta = t; else { tb = t; break; } }
+    if (ta >= 0 && tb > ta) {
+      auto pa = d.gnssPos(s0, ta);
+      auto pb = d.gnssPos(s0, tb);
+      const double dtp = d.time[tb] - d.time[ta];
+      if (dtp > 0.0)
+        v0 = gtsam::Vector3((pb[0] - pa[0]) / dtp, (pb[1] - pa[1]) / dtp, 0.0);
+    }
+  }
   gtsam::imuBias::ConstantBias bias0;
 
   graph.addPrior<gtsam::Pose3>(X(0), pose0, pose_prior_noise);
@@ -347,10 +378,13 @@ int main(int argc, char** argv) {
 
   // ---- Main loop ----
   for (int t = 1; t < T; ++t) {
-    auto imu_t = d.imuSample(ship, t);
-    gtsam::Vector3 omega(imu_t[0], imu_t[1], imu_t[2]);
-    gtsam::Vector3 accel(imu_t[3], imu_t[4], imu_t[5]);
-    pim->integrateMeasurement(accel, omega, d.imu_dt[t]);
+    // Preintegrate the high-rate IMU sub-samples covering (t-1, t].
+    for (int k = 0; k < d.M; ++k) {
+      auto s = d.imuSub(ship, t, k);
+      gtsam::Vector3 omega(s[0], s[1], s[2]);
+      gtsam::Vector3 accel(s[3], s[4], s[5]);
+      pim->integrateMeasurement(accel, omega, d.imuSubDt(t, k));
+    }
 
     // CombinedImuFactor between (X,V,B)_{t-1} and (X,V,B)_t
     graph.add(gtsam::CombinedImuFactor(X(t - 1), V(t - 1), X(t), V(t),
@@ -531,8 +565,8 @@ int main(int argc, char** argv) {
           }
         }
 
-        // Shoreline pathway.
-        if (d.n_shoreline > 0) {
+        // Shoreline pathway (off by default; see Args::use_shoreline).
+        if (args.use_shoreline && d.n_shoreline > 0) {
           for (int k = 0; k < d.kmax_polar_shoreline; ++k) {
             if (!d.polarShorelineValid(ps.sensor_idx, t, k)) continue;
             auto rd = d.polarShorelineReading(ps.sensor_idx, t, k);

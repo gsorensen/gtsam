@@ -60,6 +60,7 @@ SimMeta loadSimMeta(const std::string& json_path) {
   m.scenario = j.value("scenario", std::string{});
   m.n_ships = j.value("n_ships", 0);
   m.T = j.value("T", 0);
+  m.imu_substeps = j.value("imu_substeps", 1);
   m.dt_nominal = j.value("dt_nominal", 1.0);
   m.gravity = j.value("gravity", 9.81);
 
@@ -120,6 +121,7 @@ SimData3D loadSimData(const std::string& npz_path, const SimMeta& meta) {
   SimData3D d;
   d.n_ships = meta.n_ships;
   d.T = meta.T;
+  d.M = meta.imu_substeps > 0 ? meta.imu_substeps : 1;
   d.n_gnss = static_cast<int>(meta.gnss.size());
   d.n_polar = static_cast<int>(meta.polar.size());
   d.n_camera = static_cast<int>(meta.camera.size());
@@ -163,10 +165,12 @@ SimData3D loadSimData(const std::string& npz_path, const SimMeta& meta) {
     if (!ok) throw std::runtime_error(std::string("sim data: ") + msg);
   };
   must(static_cast<int>(d.time.size()) == d.T, "time length mismatch");
+  must(static_cast<int>(d.imu_dt.size()) == d.T * d.M,
+       "imu_dt shape mismatch (expected T*M)");
   must(static_cast<int>(d.gt_pose.size()) == d.n_ships * d.T * 7,
        "gt_pose shape mismatch");
-  must(static_cast<int>(d.imu.size()) == d.n_ships * d.T * 6,
-       "imu shape mismatch");
+  must(static_cast<int>(d.imu.size()) == d.n_ships * d.T * d.M * 6,
+       "imu shape mismatch (expected n_ships*T*M*6)");
   must(static_cast<int>(d.gnss_pos.size()) == d.n_gnss * d.T * 3,
        "gnss_pos shape mismatch");
   must(static_cast<int>(d.gnss_pos_valid.size()) == d.n_gnss * d.T,

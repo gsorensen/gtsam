@@ -55,6 +55,7 @@ struct SimMeta {
   std::string scenario;
   int n_ships{0};
   int T{0};
+  int imu_substeps{1};
   double dt_nominal{1.0};
   double gravity{9.81};
   std::vector<GnssSensorMeta> gnss;
@@ -67,16 +68,19 @@ struct SimMeta {
 struct SimData3D {
   // (T,)
   std::vector<double> time;
+  // (T * M)  per-sub-step dt (s)
   std::vector<double> imu_dt;
 
   int n_ships{0};
   int T{0};
+  int M{1};  // IMU sub-steps per smoother interval
 
   // (n_ships * T * 7)  layout [x,y,z,qw,qx,qy,qz]
   std::vector<double> gt_pose;
   // (n_ships * T * 3)
   std::vector<double> gt_vel;
-  // (n_ships * T * 6)  body-frame [wx,wy,wz, ax,ay,az]
+  // (n_ships * T * M * 6)  body-frame [wx,wy,wz, ax,ay,az]; imu[.,t] = M
+  // sub-samples covering interval (t-1, t]; imu[.,0] unused.
   std::vector<double> imu;
 
   // GNSS position and heading are independent streams.
@@ -117,10 +121,13 @@ struct SimData3D {
     return Eigen::Map<const Eigen::Matrix<double, 3, 1>>(
         gt_vel.data() + (ship * T + t) * 3);
   }
-  Eigen::Map<const Eigen::Matrix<double, 6, 1>> imuSample(int ship, int t) const {
+  // k-th IMU sub-sample of interval (t-1, t] for a ship: [wx,wy,wz, ax,ay,az].
+  Eigen::Map<const Eigen::Matrix<double, 6, 1>> imuSub(int ship, int t,
+                                                       int k) const {
     return Eigen::Map<const Eigen::Matrix<double, 6, 1>>(
-        imu.data() + (ship * T + t) * 6);
+        imu.data() + (((ship * T + t) * M) + k) * 6);
   }
+  double imuSubDt(int t, int k) const { return imu_dt[t * M + k]; }
   bool gnssPosValid(int s, int t) const {
     return gnss_pos_valid[s * T + t] != 0;
   }
