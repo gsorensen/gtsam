@@ -69,6 +69,8 @@ struct Args {
   int use_shoreline = 0;              // 0 off (default): shoreline association
                                       // is weak and corrupts yaw; opt in with
                                       // --shoreline once the frontend is fixed.
+  int use_camera = 0;                 // 0 off (default): bearing-only camera
+                                      // factors; opt in with --camera.
   double assoc_gate_chi2 = 5.99;      // 2-DoF χ² @ 95%
   // Trust overrides (sentinel: empty / NaN means "use sidecar value")
   int trust_enable = -1;              // -1 keep, 0 force off, 1 force on
@@ -118,6 +120,8 @@ Args parseArgs(int argc, char** argv) {
     else if (k == "--landmarks") a.use_landmarks = 1;
     else if (k == "--no-shoreline") a.use_shoreline = 0;
     else if (k == "--shoreline") a.use_shoreline = 1;
+    else if (k == "--no-camera") a.use_camera = 0;
+    else if (k == "--camera") a.use_camera = 1;
     else if (k == "--assoc-gate-chi2") a.assoc_gate_chi2 = std::stod(next());
     else if (k == "-h" || k == "--help") {
       std::cout
@@ -131,7 +135,7 @@ Args parseArgs(int argc, char** argv) {
           << "  [--trust-gnss-pos-thresh CHI2] [--trust-gnss-hdg-thresh CHI2]\n"
           << "  [--trust-robust-k-mult K] [--trust-gnss-veto | --no-trust-gnss-veto]\n"
           << "  [--landmarks | --no-landmarks] [--shoreline | --no-shoreline]\n"
-          << "  [--assoc-gate-chi2 5.99]\n"
+          << "  [--camera | --no-camera] [--assoc-gate-chi2 5.99]\n"
           << "  [--robust-polar none|huber|tukey|gmc] [--robust-polar-k K]\n";
       std::exit(0);
     } else {
@@ -253,6 +257,22 @@ int main(int argc, char** argv) {
                              parnav::deg2rad(pm.relative_pose[2]),
                              pm.range_noise,
                              parnav::deg2rad(pm.angle_noise_deg)});
+  }
+
+  // Per-Camera-sensor cached params + trust key (bearing-only, no range).
+  struct CameraSensor {
+    int sensor_idx;
+    std::string key;
+    double yaw_offset_rad;
+    double sigma_az_rad;
+  };
+  std::vector<CameraSensor> camera_sensors;
+  for (int s = 0; s < d.n_camera; ++s) {
+    const auto& cm = meta.camera[s];
+    if (cm.ship != ship) continue;   // land cameras excluded (see polar note)
+    camera_sensors.push_back({s, cm.name,
+                              parnav::deg2rad(cm.relative_pose[2]),
+                              parnav::deg2rad(cm.angle_noise_deg)});
   }
 
   auto build_gnss_pos_noise = [&](double trust_value) {
@@ -599,6 +619,41 @@ int main(int argc, char** argv) {
       }
     }
 
+    // ---- Camera bearing-only factors (off by default; --camera) ----
+    // Cameras measure azimuth to a landmark with no range, so each detection
+    // is bearing-only associated to a known marker and adds a single
+    // MarkerAzimuthFactor. One trust vote per sensor per step, mirroring polar.
+    if (args.use_camera && d.n_markers > 0) {
+      for (const auto& cs : camera_sensors) {
+        int n_total = 0, n_rejected = 0;
+        for (int k = 0; k < d.kmax_camera; ++k) {
+          if (!d.cameraValid(cs.sensor_idx, t, k)) continue;
+          const double az_rad = d.cameraReading(cs.sensor_idx, t, k)[0];
+          ++n_total;
+
+          parnav::AssocResult ar = parnav::associateMarkerBearing(
+              pred.pose(), cs.yaw_offset_rad, az_rad, cs.sigma_az_rad,
+              d.markers, d.n_markers, args.assoc_gate_chi2);
+          if (ar.marker_idx < 0) { ++n_rejected; continue; }
+
+          double scale = trust_cfg.enable
+                             ? parnav::trustScale(trust.get(cs.key), scale_cfg)
+                             : 1.0;
+          auto az_base = gtsam::noiseModel::Isotropic::Sigma(
+              1, scale * cs.sigma_az_rad);
+          graph.add(parnav::MarkerAzimuthFactor<gtsam::Pose3>(
+              X(t), wrapRobust(args.robust_polar, args.robust_polar_k, az_base),
+              az_rad, ar.marker_world, cs.yaw_offset_rad));
+        }
+        if (trust_cfg.enable && n_total > 0) {
+          const bool is_bad =
+              static_cast<double>(n_rejected) / n_total >= trust_cfg.gate_bad_ratio;
+          trust.update(cs.key, !is_bad);
+          sensors_seen_this_step.insert(cs.key);
+        }
+      }
+    }
+
     // Decay forgetting for known sensors that didn't fire this step so trust
     // drifts back toward the prior.
     if (trust_cfg.enable) {
@@ -608,6 +663,9 @@ int main(int argc, char** argv) {
       }
       for (const auto& ps : polar_sensors) {
         if (!sensors_seen_this_step.count(ps.key)) trust.decay(ps.key);
+      }
+      for (const auto& cs : camera_sensors) {
+        if (!sensors_seen_this_step.count(cs.key)) trust.decay(cs.key);
       }
       trust.record();
     }

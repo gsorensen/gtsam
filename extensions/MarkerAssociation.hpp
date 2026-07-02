@@ -50,4 +50,14 @@ AssocResult associateShoreline(
     double sigma_az_rad, const std::vector<double>& shoreline,
     int n_shoreline, double gate_chi2 = 5.99);
 
+// Bearing-only association for a camera detection (no range). Matches the
+// bearing to the nearest marker by angular residual alone.
+// - `gate_chi2`: χ² cutoff for the 1-DoF gate (default 3.84 @ 95%).
+// `AssocResult::maha` holds the azimuth-only Mahalanobis distance squared.
+AssocResult associateMarkerBearing(
+    const gtsam::Pose3& ship_pose, double sensor_yaw_offset_rad,
+    double azimuth_rad, double sigma_az_rad,
+    const std::vector<double>& markers, int n_markers,
+    double gate_chi2 = 3.84);
+
 }  // namespace parnav

@@ -26,3 +26,10 @@ xcode/
 _build
 GEMINI.md
 doc/#*.lyx#
+
+# multimodal smoother outputs — results live in the sim repo, not here
+/scenario*.csv
+/scenario*.png
+/multimodal_estimates*
+/*_trust.csv
+/outputtest.txt

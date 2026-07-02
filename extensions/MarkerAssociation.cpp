@@ -115,4 +115,39 @@ AssocResult associateShoreline(const gtsam::Pose3& ship_pose,
   return best;
 }
 
+AssocResult associateMarkerBearing(const gtsam::Pose3& ship_pose,
+                                   double sensor_yaw_offset_rad,
+                                   double azimuth_rad, double sigma_az_rad,
+                                   const std::vector<double>& markers,
+                                   int n_markers, double gate_chi2) {
+  AssocResult best;
+  best.maha = std::numeric_limits<double>::infinity();
+
+  const double sx = ship_pose.translation().x();
+  const double sy = ship_pose.translation().y();
+  const double yaw = ship_pose.rotation().rpy().z();
+  const double sensor_yaw_w = yaw + sensor_yaw_offset_rad;
+  const double sigma_az2 = sigma_az_rad * sigma_az_rad;
+
+  for (int i = 0; i < n_markers; ++i) {
+    const double mx = markers[i * 3 + 0];
+    const double my = markers[i * 3 + 1];
+    const double pred_az_world = std::atan2(my - sy, mx - sx);
+    const double pred_az_sensor = ssa(pred_az_world - sensor_yaw_w);
+    const double da = ssa(azimuth_rad - pred_az_sensor);
+    const double maha = (da * da) / sigma_az2;
+
+    if (maha < best.maha) {
+      best.maha = maha;
+      best.marker_idx = i;
+      best.marker_world = gtsam::Point3(mx, my, 0.0);
+    }
+  }
+
+  if (best.marker_idx < 0 || best.maha > gate_chi2) {
+    best.marker_idx = -1;
+  }
+  return best;
+}
+
 }  // namespace parnav
