@@ -16,6 +16,7 @@ Modes:
 
 import argparse
 import os
+import sys
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -43,7 +44,139 @@ SIG_DASHES = (4, 2)
 
 RESULTS_DIR = "/Users/ghms/ws/ntnu/parnav_ins_sim/results"
 
+# RMSE substate structure: (group_label, unit, convert_to_deg,
+#                           [(component_label, error_col), ...]).
+RMSE_STRUCTURE = [
+    ("Position", "m", False,
+     [("N", "pos_err_n"), ("E", "pos_err_e"), ("D", "pos_err_d")]),
+    ("Velocity", "m/s", False,
+     [("N", "vel_err_n"), ("E", "vel_err_e"), ("D", "vel_err_d")]),
+    ("Attitude", "deg", True,
+     [("roll", "att_err_roll"), ("pitch", "att_err_pitch"),
+      ("yaw", "att_err_yaw")]),
+    ("Acc bias", "m/s^2", False,
+     [("x", "acc_bias_err_x"), ("y", "acc_bias_err_y"),
+      ("z", "acc_bias_err_z")]),
+    ("Gyro bias", "deg/s", True,
+     [("x", "gyro_bias_err_x"), ("y", "gyro_bias_err_y"),
+      ("z", "gyro_bias_err_z")]),
+]
+
+
+def _rmse_rows(detail):
+    """Build the substate row list for a given detail level. Each row is
+    (label, component_label, [error_cols], to_deg). There is no separate unit
+    column: in 'all' mode the unit sits in `label` on the row below the group
+    name; in 'group'/'axis' it is appended inline to the group name."""
+    rows = []
+    for grp, unit, to_deg, comps in RMSE_STRUCTURE:
+        norm_cols = [c for _, c in comps]
+        if detail == "group":
+            rows.append((f"{grp} ({unit})", "", norm_cols, to_deg))
+        elif detail == "axis":
+            for clabel, col in comps:
+                rows.append((f"{grp} ({unit})", clabel, [col], to_deg))
+        else:  # all: norm row, then unit row + per-axis rows
+            rows.append((grp, "Norm", norm_cols, to_deg))
+            for i, (clabel, col) in enumerate(comps):
+                rows.append((unit if i == 0 else "", clabel, [col], to_deg))
+    return rows
+
+
 # ============================================================================
+
+
+def _substate_rmse(df, cols, to_deg):
+    """RMSE of a substate. For multi-column groups this is the RMS of the
+    per-sample vector magnitude: sqrt(mean(sum_axes err^2))."""
+    sq = np.zeros(len(df))
+    for c in cols:
+        e = df[c].values
+        if to_deg:
+            e = np.degrees(e)
+        sq = sq + e * e
+    return float(np.sqrt(np.nanmean(sq)))
+
+
+# Baseline and the four canonical (preint, bias) combinations. Each %impr
+# column compares one variant against the SE3 + CB baseline.
+RMSE_BASELINE = "SE3 + CB"
+RMSE_COLS = ["SE3 + CB", "SE3 + GM", "SE23 + CB", "SE23 + GM"]
+IMPR_COLS = [
+    ("%impr of GM", "SE3 + GM"),
+    ("%impr of SE23", "SE23 + CB"),
+    ("%impr of SE23+GM", "SE23 + GM"),
+]
+
+
+def print_rmse_table(datasets, detail):
+    """Print an RMSE table: one row per substate.
+
+    Columns: the four RMSE values (SE3/SE23 x CB/GM), three %impr columns
+    (each variant vs the SE3+CB baseline; green = better, red = worse), and
+    a final column naming the lowest-RMSE combination for that substate.
+    """
+    substates = _rmse_rows(detail)
+
+    use_color = sys.stdout.isatty()
+    GREEN, RED, RESET = "\033[32m", "\033[31m", "\033[0m"
+
+    def sign_color(cell, impr):
+        if not use_color or impr == 0:
+            return cell
+        return f"{GREEN if impr > 0 else RED}{cell}{RESET}"
+
+    by_label = {ds[0]: ds[1] for ds in datasets}
+
+    grp_w = max([len("Substate")] + [len(s[0]) for s in substates]) + 2
+    comp_w = max([0] + [len(s[1]) for s in substates])
+    if comp_w:
+        comp_w += 2
+    col_w = max(12, max(len(c) for c in RMSE_COLS) + 2)
+    impr_w = max(len(h) for h, _ in IMPR_COLS) + 2
+    diff_header = "%diff SE3/SE23 GM"
+    diff_w = len(diff_header) + 2
+
+    header = "Substate".ljust(grp_w) + ("Comp".ljust(comp_w) if comp_w else "")
+    header += "".join(c.rjust(col_w) for c in RMSE_COLS)
+    header += "".join(h.rjust(impr_w) for h, _ in IMPR_COLS)
+    header += diff_header.rjust(diff_w)
+    header += "  " + "Best combination"
+    print(f"\n=== RMSE ({detail}) ===")
+    print(header)
+    print("-" * len(header))
+
+    for idx, (label, comp, cols, to_deg) in enumerate(substates):
+        # Blank separator before each new group in 'all' mode.
+        if detail == "all" and comp == "Norm" and idx:
+            print()
+        rmse = {lbl: _substate_rmse(by_label[lbl], cols, to_deg)
+                for lbl in RMSE_COLS if lbl in by_label}
+        row = label.ljust(grp_w) + (comp.ljust(comp_w) if comp_w else "")
+
+        for lbl in RMSE_COLS:
+            row += (f"{rmse[lbl]:>{col_w}.4f}" if lbl in rmse
+                    else "n/a".rjust(col_w))
+
+        base = rmse.get(RMSE_BASELINE)
+        for _h, var in IMPR_COLS:
+            if base and var in rmse:
+                impr = (base - rmse[var]) / base * 100.0
+                row += sign_color(f"{impr:>{impr_w}.2f}", impr)
+            else:
+                row += "n/a".rjust(impr_w)
+
+        # %diff of SE23+GM relative to SE3+GM (isolates SE23 within GM).
+        gm3, gm23 = rmse.get("SE3 + GM"), rmse.get("SE23 + GM")
+        if gm3 and gm23 is not None:
+            diff = (gm3 - gm23) / gm3 * 100.0
+            row += sign_color(f"{diff:>{diff_w}.2f}", diff)
+        else:
+            row += "n/a".rjust(diff_w)
+
+        best = min(rmse, key=rmse.get) if rmse else "n/a"
+        row += "  " + best
+        print(row)
 
 
 def tag_from_path(path: str) -> str:
@@ -89,6 +222,16 @@ def main():
         help="'error3sigma' (default) plots error line with +/-3 sigma "
              "envelope; 'sigma1' plots the 1-sigma curve over time only.",
     )
+    parser.add_argument(
+        "--rmse",
+        choices=("group", "axis", "all", "none"),
+        default="group",
+        help="Print an RMSE table: 'group' = 5 substates "
+             "(position/velocity/attitude/acc bias/gyro bias magnitudes); "
+             "'axis' = 15 per-axis substates (N/E/D, roll/pitch/yaw, ...); "
+             "'all' = each group's norm followed by its per-axis rows; "
+             "'none' = skip.",
+    )
     args = parser.parse_args()
 
     # Index PLOT_ORDER by tag for quick lookup.
@@ -116,6 +259,9 @@ def main():
     if not datasets:
         print(f"No result files found in {args.dir}")
         return
+
+    if args.rmse != "none":
+        print_rmse_table(datasets, args.rmse)
 
     rad2deg = np.degrees
 
