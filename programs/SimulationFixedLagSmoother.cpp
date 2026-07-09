@@ -75,18 +75,37 @@ enum class Aiding { GNSS, PARSFull, None };
 constexpr double gnss_bootstrap_duration = 150.0;
 
 /// Default input/output paths (overridable via --input / --output-dir)
-const std::string default_input_file =
-    "/Users/ghms/ws/ntnu/parnav_ins_sim/data/"
-    "otter_simulation_data_01_100Hz_noisy_biased_aided_at_10Hz_cpp.csv";
+const std::string default_data_dir =
+    "/Users/ghms/ws/ntnu/parnav_ins_simulator/data/";
 const std::string default_output_dir =
-    "/Users/ghms/ws/ntnu/parnav_ins_sim/results/";
+    "/Users/ghms/ws/ntnu/parnav_ins_simulator/results/";
+
+/// Build the orbital figure-eight input CSV name for the given noise/bias
+/// combination and Monte Carlo run index. Mirrors run_orbital_simulation.m's
+/// filename convention:
+/// simulation_data_<run>_100Hz[_noisy][_biased]_aided_at_<aiding_hz>Hz_cpp.csv
+/// (run is the simulator's iteration/%02d index; aiding_hz its aiding_Hz).
+inline std::string build_input_file(bool with_noise, bool with_bias,
+                                    int aiding_hz, int run) {
+  char run_str[8];
+  snprintf(run_str, sizeof(run_str), "%02d", run);
+  std::string f = default_data_dir + "simulation_data_" + run_str + "_100Hz";
+  if (with_noise) f += "_noisy";
+  if (with_bias) f += "_biased";
+  f += "_aided_at_" + std::to_string(aiding_hz) + "Hz_cpp.csv";
+  return f;
+}
 
 /// Runtime options populated from CLI.
 struct Options {
   bool use_gauss_markov = true;
   bool use_se23 = true;
   Aiding aiding_scheme = Aiding::PARSFull;
-  std::string input_file = default_input_file;
+  bool with_noise = true;   // select the _noisy input variant
+  bool with_bias = true;    // select the _biased input variant
+  int aiding_hz = 10;       // aiding rate [Hz] baked into the input filename
+  int run = 1;              // Monte Carlo run index in the input filename
+  std::string input_file;   // empty -> built from with_noise/with_bias/aiding_hz
   std::string output_dir = default_output_dir;
   std::string output_suffix;   // Appended before `.csv` in the output filename.
   double duration = 0.0;       // Run-length cap in seconds; 0 = run to end.
@@ -326,10 +345,11 @@ void run_estimation(const SimulationData& sd, const Options& opts) {
   auto gnss_noise = gtsam::noiseModel::Diagonal::Sigmas(
       (gtsam::Vector(3) << 1.5, 1.5, 3.0).finished());
 
-  // PARS noise models
-  double sigma_range = 5;
-  double sigma_azimuth = 7.0 * deg2rad(1.0);
-  double sigma_elevation = 7.0 * deg2rad(1.0);
+  // PARS noise models (match generate_simulation_data.m: sigma_rho=1.5,
+  // sigma_Psi=sigma_alpha=5 deg)
+  double sigma_range = 1.5;
+  double sigma_azimuth = 5.0 * deg2rad(1.0);
+  double sigma_elevation = 5.0 * deg2rad(1.0);
   auto range_noise = gtsam::noiseModel::Isotropic::Sigma(1, sigma_range);
   auto azimuth_noise = gtsam::noiseModel::Isotropic::Sigma(1, sigma_azimuth);
   auto elevation_noise =
@@ -414,6 +434,8 @@ void run_estimation(const SimulationData& sd, const Options& opts) {
   // 3-sigma bounds (15 states: att_rpy(3), pos_ned(3), vel_ned(3), ab(3),
   // gb(3))
   std::vector<Eigen::Matrix<double, 15, 1>> three_sigma;
+  // Timestamp [s] of each logged result row (aligned with pos_err/three_sigma).
+  std::vector<double> result_time;
   est_pos.push_back(p0);
   est_vel.push_back(v0);
   est_att.push_back(R0);
@@ -429,12 +451,18 @@ void run_estimation(const SimulationData& sd, const Options& opts) {
                 sd.N, static_cast<uint64_t>(opts.duration / dt) + 1)
           : sd.N;
 
+  // Aiding cadence: the CSV stores the IMU rate (freq) and the aiding rate
+  // (aiding_freq) in Hz; the stride is their ratio. Read from the data so
+  // changing the aiding rate in the simulator alone is honoured here.
+  const uint16_t aiding_stride =
+      std::max<uint16_t>(1, sd.freq() / std::max<uint16_t>(1, sd.aiding_freq()));
+
   for (uint64_t idx = 1; idx < max_idx; ++idx) {
     Eigen::Vector3d f = imu_f.row(idx).transpose();
     Eigen::Vector3d w = imu_w.row(idx).transpose();
     preintegrated->integrateMeasurement(f, w, dt);
 
-    bool is_update_step = (idx + 1) % 10 == 0;
+    bool is_update_step = (idx + 1) % aiding_stride == 0;
 
     if (is_update_step) {
       correction_count++;
@@ -496,6 +524,7 @@ void run_estimation(const SimulationData& sd, const Options& opts) {
         pos_err.push_back(p_err);
         vel_err.push_back(v_err);
         att_err.push_back(a_err);
+        result_time.push_back(timestamp);
         acc_bias_err.push_back(ab_err);
         gyro_bias_err.push_back(gb_err);
 
@@ -672,6 +701,7 @@ void run_estimation(const SimulationData& sd, const Options& opts) {
       pos_err.push_back(p_err);
       vel_err.push_back(v_err);
       att_err.push_back(a_err);
+      result_time.push_back(timestamp);
       acc_bias_err.push_back(ab_err);
       gyro_bias_err.push_back(gb_err);
 
@@ -757,7 +787,8 @@ void run_estimation(const SimulationData& sd, const Options& opts) {
     return;
   }
 
-  out << "pos_n,pos_e,pos_d,vel_n,vel_e,vel_d,roll,pitch,yaw,"
+  out << "t,"
+      << "pos_n,pos_e,pos_d,vel_n,vel_e,vel_d,roll,pitch,yaw,"
       << "pos_err_n,pos_err_e,pos_err_d,vel_err_n,vel_err_e,vel_err_d,"
       << "att_err_roll,att_err_pitch,att_err_yaw,"
       << "acc_bias_err_x,acc_bias_err_y,acc_bias_err_z,"
@@ -779,8 +810,10 @@ void run_estimation(const SimulationData& sd, const Options& opts) {
     const auto& abe = acc_bias_err[i];
     const auto& gbe = gyro_bias_err[i];
     const auto& s3 = three_sigma[i];
+    const double ts = i < result_time.size() ? result_time[i] : i * dt;
     char buf[2048];
     snprintf(buf, sizeof(buf),
+             "%.6f,"
              "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
              "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
              "%.6f,%.6f,%.6f,"
@@ -791,6 +824,7 @@ void run_estimation(const SimulationData& sd, const Options& opts) {
              "%.8f,%.8f,%.8f,"
              "%.8f,%.8f,%.8f,"
              "%.8f,%.8f,%.8f\n",
+             ts,
              ep.x(), ep.y(), ep.z(), ev.x(), ev.y(), ev.z(), ea.roll(),
              ea.pitch(), ea.yaw(), pe.x(), pe.y(), pe.z(), ve.x(), ve.y(),
              ve.z(), ae.x(), ae.y(), ae.z(), abe.x(), abe.y(), abe.z(), gbe.x(),
@@ -825,9 +859,19 @@ void print_usage(const char* prog) {
       << "                           none = IMU-only; auto-enables init\n"
       << "                                  from ground truth\n"
       << "  --duration <seconds>     cap run length (0 = full data, default 0)\n"
+      << "  --with-noise|--no-noise  use the _noisy input variant (default on);\n"
+      << "                           --no-noise selects the noiseless data\n"
+      << "  --with-bias|--no-bias    use the _biased input variant (default on);\n"
+      << "                           --no-bias selects the biasless data\n"
+      << "  --aiding-hz <N>          aiding rate [Hz] in the input filename\n"
+      << "                           (default 10 -> _aided_at_10Hz); the stride\n"
+      << "                           is derived from the CSV (imu_hz/aiding_hz)\n"
+      << "  --run <N>                Monte Carlo run index in the input\n"
+      << "                           filename (simulation_data_<N>_..., default 1)\n"
       << "  --init-from-truth        initialise state from truth columns\n"
       << "                           (default on when --aiding none)\n"
-      << "  --input <path>           input simulation CSV\n"
+      << "  --input <path>           input simulation CSV (overrides\n"
+      << "                           --with-noise/--with-bias selection)\n"
       << "  --output-dir <path>      output directory for result CSVs\n"
       << "  --output-suffix <str>    suffix appended before .csv\n"
       << "                           (e.g. _none_10s)\n"
@@ -869,6 +913,20 @@ bool parse_args(int argc, char** argv, Options& opts) {
     } else if (a == "--duration") {
       if (!need_value(i, a)) return false;
       opts.duration = std::stod(argv[++i]);
+    } else if (a == "--with-noise") {
+      opts.with_noise = true;
+    } else if (a == "--no-noise") {
+      opts.with_noise = false;
+    } else if (a == "--with-bias") {
+      opts.with_bias = true;
+    } else if (a == "--no-bias") {
+      opts.with_bias = false;
+    } else if (a == "--aiding-hz") {
+      if (!need_value(i, a)) return false;
+      opts.aiding_hz = std::stoi(argv[++i]);
+    } else if (a == "--run") {
+      if (!need_value(i, a)) return false;
+      opts.run = std::stoi(argv[++i]);
     } else if (a == "--init-from-truth") {
       opts.init_from_truth = true;
     } else if (a == "--output-suffix") {
@@ -896,6 +954,12 @@ bool parse_args(int argc, char** argv, Options& opts) {
 int main(int argc, char* argv[]) {
   Options opts;
   if (!parse_args(argc, argv, opts)) return 1;
+
+  // Resolve the input file from the noise/bias flags unless --input overrode it.
+  if (opts.input_file.empty()) {
+    opts.input_file = build_input_file(opts.with_noise, opts.with_bias,
+                                       opts.aiding_hz, opts.run);
+  }
 
   // No-aiding runs default to initialising at ground truth so the plot shows
   // pure covariance growth (errors start at zero).

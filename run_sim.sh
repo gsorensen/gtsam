@@ -9,14 +9,30 @@
 #
 # Usage:
 #   ./run_sim.sh [--aiding gnss|pars|none] [--output-dir DIR]
-#                [--rmse group|axis|all|none] [-- <extra sim args...>]
+#                [--rmse group|axis|all|none] [--latex-dir DIR]
+#                [--with-noise|--no-noise] [--with-bias|--no-bias]
+#                [--aiding-hz N] [--duration SEC] [-- <extra sim args...>]
 #
 # --rmse selects the RMSE table granularity in the plot output:
 #   group (default) = 5 substates, axis = 15 per-axis,
 #   all = each group's norm + its per-axis rows, none = skip.
+# --fig-dir DIR     base dir for figures (default the Overleaf figures
+#                   folder). Output nests under <dir>/sim/<scenario>, where
+#                   scenario = dead_reckoning (none) | gnss | pars.
+# --latex-dir DIR   base dir for LaTeX tables (default the Overleaf tables
+#                   folder). Also nests under sim/<scenario>.
+# --box-yscale log|linear  y-axis scale for the box plot (default log).
+# --mc-runs N   run N Monte Carlo runs (input simulation_data_01..NN); the
+#   3-sigma plots use run 01, the RMSE is averaged over all N (default 1).
+# --no-noise / --no-bias select the noiseless / biasless input CSV
+#   (both noisy+biased by default).
+# --aiding-hz N selects the input CSV whose filename says _aided_at_NHz,
+#   where N is the aiding rate in Hz (default 10; 1 = every second).
+# --duration SEC caps the run length in seconds (0 = full data). Useful for
+#   bounded dead-reckoning tests, e.g. --aiding none --duration 50.
 #
 # Extra args after `--` are forwarded verbatim to every sim run
-# (e.g. -- --duration 120 --input /path/to.csv).
+# (e.g. -- --input /path/to.csv).
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,6 +42,11 @@ PLOTTER="$REPO/visualisations/plot_3sigma.py"
 AIDING="pars"
 OUTPUT_DIR=""          # empty -> let the binary use its default dir
 RMSE="group"           # RMSE table granularity: group|axis|none
+FIG_DIR=""             # empty -> plotter default (Overleaf .../figures)
+LATEX_DIR=""           # empty -> plotter default (Overleaf .../tables)
+BOX_YSCALE=""          # empty -> plotter default (log)
+MC_RUNS=1              # number of Monte Carlo runs to smooth + aggregate
+BIN_ARGS=()            # forwarded to the binary (noise/bias/aiding-hz/duration)
 EXTRA=()
 
 while [[ $# -gt 0 ]]; do
@@ -33,6 +54,13 @@ while [[ $# -gt 0 ]]; do
     --aiding)     AIDING="$2"; shift 2 ;;
     --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
     --rmse)       RMSE="$2"; shift 2 ;;
+    --fig-dir)    FIG_DIR="$2"; shift 2 ;;
+    --latex-dir)  LATEX_DIR="$2"; shift 2 ;;
+    --box-yscale) BOX_YSCALE="$2"; shift 2 ;;
+    --mc-runs)    MC_RUNS="$2"; shift 2 ;;
+    --duration)   BIN_ARGS+=("$1" "$2"); shift 2 ;;
+    --aiding-hz)  BIN_ARGS+=("$1" "$2"); shift 2 ;;
+    --with-noise|--no-noise|--with-bias|--no-bias) BIN_ARGS+=("$1"); shift ;;
     --)           shift; EXTRA=("$@"); break ;;
     -h|--help)    grep '^#' "$0" | grep -v '^#!' | cut -c3-; exit 0 ;;
     *)            echo "Unknown argument: $1" >&2; exit 1 ;;
@@ -41,6 +69,13 @@ done
 
 case "$AIDING" in gnss|pars|none) ;; *)
   echo "Invalid --aiding: $AIDING (expected gnss|pars|none)" >&2; exit 1 ;;
+esac
+
+# Scenario subfolder for figures/tables (sim/<scenario>).
+case "$AIDING" in
+  none) SCENARIO=dead_reckoning ;;
+  gnss) SCENARIO=gnss ;;
+  pars) SCENARIO=pars ;;
 esac
 
 if [[ ! -x "$BIN" ]]; then
@@ -53,19 +88,28 @@ DIR_ARGS=()
 [[ -n "$OUTPUT_DIR" ]] && DIR_ARGS=(--output-dir "$OUTPUT_DIR")
 
 run() {
-  local preint="$1" bias="$2"
+  local preint="$1" bias="$2" run_idx="$3"
+  local run_args=()
+  # With >1 Monte Carlo run, pick the run's input CSV (--run) and tag the
+  # result CSV (_runNN) so the plotter can aggregate them.
+  if (( MC_RUNS > 1 )); then
+    run_args=(--run "$run_idx" --output-suffix "$(printf '_run%02d' "$run_idx")")
+  fi
   echo
   echo "=========================================================="
-  echo "aiding=$AIDING  preint=$preint  bias=$bias"
+  echo "aiding=$AIDING  preint=$preint  bias=$bias  run=$run_idx/$MC_RUNS"
   echo "=========================================================="
   "$BIN" --aiding "$AIDING" --preint "$preint" --bias "$bias" \
+    ${run_args[@]+"${run_args[@]}"} ${BIN_ARGS[@]+"${BIN_ARGS[@]}"} \
     ${DIR_ARGS[@]+"${DIR_ARGS[@]}"} ${EXTRA[@]+"${EXTRA[@]}"}
 }
 
-run legacy cb
-run legacy gm
-run se23   cb
-run se23   gm
+for r in $(seq 1 "$MC_RUNS"); do
+  run legacy cb "$r"
+  run legacy gm "$r"
+  run se23   cb "$r"
+  run se23   gm "$r"
+done
 
 echo
 echo "=== Plotting 3-sigma error comparison ==="
@@ -76,4 +120,8 @@ if [[ -f "$VENV/bin/activate" ]]; then
 fi
 PLOT_ARGS=(--rmse "$RMSE")
 [[ -n "$OUTPUT_DIR" ]] && PLOT_ARGS+=(--dir "$OUTPUT_DIR")
+[[ -n "$FIG_DIR" ]] && PLOT_ARGS+=(--fig-dir "$FIG_DIR")
+[[ -n "$LATEX_DIR" ]] && PLOT_ARGS+=(--latex-dir "$LATEX_DIR")
+[[ -n "$BOX_YSCALE" ]] && PLOT_ARGS+=(--box-yscale "$BOX_YSCALE")
+PLOT_ARGS+=(--mc-runs "$MC_RUNS" --scenario "$SCENARIO")
 python "$PLOTTER" "${PLOT_ARGS[@]}"
