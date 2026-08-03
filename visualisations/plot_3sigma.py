@@ -103,6 +103,15 @@ def _substate_rmse(df, cols, to_deg):
     return float(np.sqrt(np.nanmean(sq)))
 
 
+def _downsample(df, max_points):
+    """Stride-subsample a dataframe to at most max_points rows (for plotting
+    only). 0 or a small frame is returned unchanged."""
+    if max_points and len(df) > max_points:
+        stride = int(np.ceil(len(df) / max_points))
+        return df.iloc[::stride]
+    return df
+
+
 def _mc_average(dfs):
     """Combine N Monte Carlo run dataframes into one whose error columns hold
     the per-sample RMS across runs, sqrt(mean_runs err^2). Squaring this in
@@ -513,8 +522,22 @@ def main():
     parser.add_argument(
         "--scenario",
         default="",
-        help="If set, figures and tables are nested under sim/<scenario> "
-             "(e.g. dead_reckoning, gnss).",
+        help="If set, figures and tables are nested under <scenario> "
+             "(e.g. sim/dead_reckoning, bledar_gnss).",
+    )
+    parser.add_argument(
+        "--result-prefix",
+        default="gtsam_fork_test_",
+        help="Result CSV filename prefix (default gtsam_fork_test_; use "
+             "bledar_ for the multirotor runs).",
+    )
+    parser.add_argument(
+        "--max-plot-points",
+        type=int,
+        default=20000,
+        help="Downsample each series to at most this many points for the "
+             "figures (RMSE tables always use the full data). Keeps very "
+             "high-rate datasets renderable. 0 disables.",
     )
     parser.add_argument(
         "--latex-dir",
@@ -545,9 +568,8 @@ def main():
     args.fig_dir = os.path.expanduser(args.fig_dir)
     args.latex_dir = os.path.expanduser(args.latex_dir)
     if args.scenario:
-        sub = os.path.join("sim", args.scenario)
-        args.fig_dir = os.path.join(args.fig_dir, sub)
-        args.latex_dir = os.path.join(args.latex_dir, sub)
+        args.fig_dir = os.path.join(args.fig_dir, args.scenario)
+        args.latex_dir = os.path.join(args.latex_dir, args.scenario)
     os.makedirs(args.fig_dir, exist_ok=True)
 
     # Index PLOT_ORDER by tag for quick lookup.
@@ -561,11 +583,12 @@ def main():
     mc_all = []  # (label, [all run dataframes], color) -> pooled box plot
 
     def _run_path(fname_suffix, run):
+        pre = args.result_prefix
         if args.mc_runs > 1:
             return os.path.join(
-                args.dir, f"gtsam_fork_test_{fname_suffix}_run{run:02d}.csv")
+                args.dir, f"{pre}{fname_suffix}_run{run:02d}.csv")
         return os.path.join(
-            args.dir, f"gtsam_fork_test_{fname_suffix}{args.suffix}.csv")
+            args.dir, f"{pre}{fname_suffix}{args.suffix}.csv")
 
     if args.csv:
         for path in args.csv:
@@ -606,13 +629,18 @@ def main():
                                      args.mc_runs)
         print(f"\nLaTeX tables written to {out_dir}")
 
+    # Downsample the first-run dataframes for the time-series figures (keeps
+    # very high-rate datasets renderable; RMSE tables use the full data).
+    plot_datasets = [(lbl, _downsample(df, args.max_plot_points), c)
+                     for lbl, df, c in datasets]
+
     # Combined figures (all available combinations overlaid).
-    plot_main_grid(datasets, args)
-    plot_lie_group_axes(datasets, args)
-    plot_lie_group_norm(datasets, args)
+    plot_main_grid(plot_datasets, args)
+    plot_lie_group_axes(plot_datasets, args)
+    plot_lie_group_norm(plot_datasets, args)
 
     # One figure per Lie-group block, plus a box plot (pooled over all runs).
-    plot_lie_group_by_group(datasets, args)
+    plot_lie_group_by_group(plot_datasets, args)
     plot_box(mc_all, args)
 
     plt.show()
@@ -963,7 +991,13 @@ def plot_box(combos, args):
                 with np.errstate(divide="ignore", invalid="ignore"):
                     r = e / s
                 samples.append(r[np.isfinite(r) & (r > 0)])
-            data.append(np.concatenate(samples) if samples else np.array([]))
+            pooled = np.concatenate(samples) if samples else np.array([])
+            cap = args.max_plot_points
+            if cap and len(pooled) > cap:  # bound flier count for the renderer
+                pooled = pooled[np.linspace(0, len(pooled) - 1, cap).astype(int)]
+            # An all-zero error block (e.g. no truth for that state) filters to
+            # empty; use NaN so the box is simply omitted instead of erroring.
+            data.append(pooled if pooled.size else np.array([np.nan]))
         colors = [c for _lbl, _d, c in combos]
         labels = [lbl for lbl, _d, _c in combos]
         bp = ax.boxplot(data, patch_artist=True, showfliers=True,

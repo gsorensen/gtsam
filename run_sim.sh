@@ -73,9 +73,9 @@ esac
 
 # Scenario subfolder for figures/tables (sim/<scenario>).
 case "$AIDING" in
-  none) SCENARIO=dead_reckoning ;;
-  gnss) SCENARIO=gnss ;;
-  pars) SCENARIO=pars ;;
+  none) SCENARIO=sim/dead_reckoning ;;
+  gnss) SCENARIO=sim/gnss ;;
+  pars) SCENARIO=sim/pars ;;
 esac
 
 if [[ ! -x "$BIN" ]]; then
