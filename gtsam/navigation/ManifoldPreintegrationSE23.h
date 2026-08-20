@@ -25,6 +25,15 @@
 
 namespace gtsam {
 
+/// Single-step increment model for the SE_2(3) preintegration (chooses both the
+/// mean increment Ypsilon_hat and the matched measurement Jacobian G_j):
+///   - SimpleGlobalAcc : constant GLOBAL acceleration over the step
+///                       (dv = f_hat*dt, dp = f_hat*dt^2/2). Cheapest.
+///   - ConstantBodyImu : constant BODY specific force over the step
+///                       (dv = J_l(w*dt) f_hat dt, dp = C_hat(w,dt) f_hat).
+/// The two must be paired with their matching G_j (Brossard Remark 5).
+enum class SE23IncrementModel { SimpleGlobalAcc, ConstantBodyImu };
+
 template <typename Bias = imuBias::ConstantBias>
 class GTSAM_EXPORT ManifoldPreintegrationSE23
     : public PreintegrationSE23Base<Bias> {
@@ -41,6 +50,9 @@ class GTSAM_EXPORT ManifoldPreintegrationSE23
   using PreintegrationSE23Base<Bias>::biasHat;
   using PreintegrationSE23Base<Bias>::correctMeasurementsBySensorPose;
 
+  /// Single-step increment model (mean + matched G_j). Default: cheapest.
+  SE23IncrementModel incrementModel_ = SE23IncrementModel::SimpleGlobalAcc;
+
   /// Preintegrated navigation state on SE_2(3), from i to j.
   ExtendedPose3 deltaXij_;
 
@@ -55,12 +67,17 @@ class GTSAM_EXPORT ManifoldPreintegrationSE23
   /// Default ctor for serialization.
   ManifoldPreintegrationSE23() { resetIntegration(); }
 
-  /// Constructor from params + bias.
-  ManifoldPreintegrationSE23(const std::shared_ptr<Params>& p,
-                             const Bias& biasHat = Bias())
-      : PreintegrationSE23Base<Bias>(p, biasHat) {
+  /// Constructor from params + bias (+ optional increment model).
+  ManifoldPreintegrationSE23(
+      const std::shared_ptr<Params>& p, const Bias& biasHat = Bias(),
+      SE23IncrementModel incrementModel = SE23IncrementModel::SimpleGlobalAcc)
+      : PreintegrationSE23Base<Bias>(p, biasHat),
+        incrementModel_(incrementModel) {
     resetIntegration();
   }
+
+  /// Which single-step increment model this preintegrator uses.
+  SE23IncrementModel incrementModel() const { return incrementModel_; }
 
   /// @name Basic utilities
   /// @{
@@ -94,7 +111,9 @@ class GTSAM_EXPORT ManifoldPreintegrationSE23
   ///   B = d(xi_new)/d(acc)     (9x3, from G_j cols 0-2)
   ///   C = d(xi_new)/d(omega)   (9x3, from G_j cols 3-5)
   void update(const Vector3& measuredAcc, const Vector3& measuredOmega,
-              const double dt, Matrix9* A, Matrix93* B, Matrix93* C) override;
+              const double dt, Matrix9* A, Matrix93* B, Matrix93* C,
+              Vector3* correctedAcc = nullptr,
+              Vector3* correctedOmega = nullptr) override;
 
   /// 9-vector tangent (Barrau ordering) of the bias-corrected preintegrated delta.
   Vector9 biasCorrectedDelta(const Bias& bias_i,

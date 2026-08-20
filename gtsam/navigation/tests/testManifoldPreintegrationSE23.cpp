@@ -141,6 +141,99 @@ TEST(ManifoldPreintegrationSE23, ZeroResidualAtPrediction) {
 }
 
 /* ************************************************************************* */
+// Phase-A check: the one-step 9x9 transition A must be Ad(Yhat^{-1})*F_dt, whose
+// top-left 3x3 block is Exp(-w_hat*dt) (ref assertion #4). Under the old
+// A = F_dt (identity top-left) this fails.
+TEST(ManifoldPreintegrationSE23, TransitionTopLeftIsExpNegOmega) {
+  ManifoldPreintegrationSE23<> pim(testing::Params());  // zero biasHat
+  const Vector3 acc(0.05, 0.09, 0.01), omega(0.03, 0.09, 0.06);
+  const double dt = 0.01;
+  Matrix9 A;
+  Matrix93 B, C;
+  pim.update(acc, omega, dt, &A, &B, &C);
+  EXPECT(assert_equal(Rot3::Expmap(-omega * dt).matrix(),
+                      Matrix3(A.block<3, 3>(0, 0)), 1e-12));
+}
+
+/* ************************************************************************* */
+// Strong bias-Jacobian check: the accumulated J_bias must equal the first-order
+// sensitivity of the *re-integrated* preintegrated delta to the linearization
+// bias (ref assertion #9). This exercises the full transition A across the
+// whole window; it fails under A = F_dt (missing the rotational coupling).
+namespace {
+Vector9 reintegratedLog(const testing::SomeMeasurements& ms, const Bias& b,
+                        SE23IncrementModel model) {
+  ManifoldPreintegrationSE23<> pim(testing::Params(), b, model);
+  testing::integrateMeasurements(ms, &pim);
+  return ExtendedPose3::Logmap(pim.deltaXij());
+}
+
+// Returns {numeric FD, analytic J_bias} for comparison inside a TEST.
+std::pair<Matrix, Matrix> biasJacobianNumericVsAnalytic(
+    SE23IncrementModel model) {
+  testing::SomeMeasurements ms;
+  const Bias biasHat(Vector3(0.01, -0.02, 0.005),
+                     Vector3(-0.003, 0.004, 0.002));
+  ManifoldPreintegrationSE23<> pim(testing::Params(), biasHat, model);
+  testing::integrateMeasurements(ms, &pim);
+
+  Matrix96 H;
+  pim.biasCorrectedDelta(biasHat, H);
+
+  std::function<Vector9(const Bias&)> f = [&](const Bias& b) {
+    return reintegratedLog(ms, b, model);
+  };
+  return {numericalDerivative11<Vector9, Bias>(f, biasHat), Matrix(H)};
+}
+}  // namespace
+
+TEST(ManifoldPreintegrationSE23, BiasJacobianVsReintegration_Simple) {
+  auto r = biasJacobianNumericVsAnalytic(SE23IncrementModel::SimpleGlobalAcc);
+  EXPECT(assert_equal(r.first, r.second, 1e-5));
+}
+
+TEST(ManifoldPreintegrationSE23, BiasJacobianVsReintegration_Full) {
+  auto r = biasJacobianNumericVsAnalytic(SE23IncrementModel::ConstantBodyImu);
+  EXPECT(assert_equal(r.first, r.second, 1e-5));
+}
+
+/* ************************************************************************* */
+// The two increment models must agree exactly when omega == 0 (J_l(0)=I,
+// C_hat(0,dt)=dt^2/2 I), a sanity check on the ConstantBodyImu math.
+TEST(ManifoldPreintegrationSE23, SimpleFullAgreeZeroOmega) {
+  auto p = std::make_shared<PreintegrationParams>(Vector3(0, 0, 9.81));
+  ManifoldPreintegrationSE23<> pimS(p, Bias(), SE23IncrementModel::SimpleGlobalAcc);
+  ManifoldPreintegrationSE23<> pimF(p, Bias(), SE23IncrementModel::ConstantBodyImu);
+  const Vector3 acc(0.3, -0.2, 0.1), omega = Vector3::Zero();
+  for (int i = 0; i < 50; ++i) {
+    pimS.integrateMeasurement(acc, omega, 0.01);
+    pimF.integrateMeasurement(acc, omega, 0.01);
+  }
+  EXPECT(assert_equal(pimS.deltaXij(), pimF.deltaXij(), 1e-12));
+}
+
+/* ************************************************************************* */
+// predict()/computeError() Jacobians for the ConstantBodyImu increment model.
+TEST(ManifoldPreintegrationSE23, FullModelPredictJacobians) {
+  testing::SomeMeasurements measurements;
+  ManifoldPreintegrationSE23<> pim(testing::Params(), Bias(),
+                                   SE23IncrementModel::ConstantBodyImu);
+  testing::integrateMeasurements(measurements, &pim);
+
+  const ExtendedPose3 x1(Rot3::Yaw(0.2), Vector3(0.4, -0.1, 0.05),
+                         Point3(0.3, -0.2, 0.1));
+  const Bias bias(Vector3(0.01, -0.02, 0.005), Vector3(-0.001, 0.002, 0.003));
+
+  Matrix9 aH1;
+  Matrix96 aH2;
+  pim.predict(x1, bias, aH1, aH2);
+  std::function<ExtendedPose3(const ExtendedPose3&, const Bias&)> f =
+      [&](const ExtendedPose3& s, const Bias& b) { return pim.predict(s, b); };
+  EXPECT(assert_equal(numericalDerivative21(f, x1, bias), aH1, 1e-5));
+  EXPECT(assert_equal(numericalDerivative22(f, x1, bias), aH2, 1e-5));
+}
+
+/* ************************************************************************* */
 int main() {
   TestResult tr;
   return TestRegistry::runAllTests(tr);

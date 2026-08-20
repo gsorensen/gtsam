@@ -103,10 +103,13 @@ class GTSAM_EXPORT PreintegrationSE23Base {
       OptionalJacobian<3, 3> correctedAcc_H_unbiasedOmega = {},
       OptionalJacobian<3, 3> correctedOmega_H_unbiasedOmega = {}) const;
 
-  /// Advance the integration with a new IMU sample.
+  /// Advance the integration with a new IMU sample. Optionally outputs the
+  /// bias/sensor-corrected specific force and angular rate (f_hat, w_hat) used
+  /// this step, which the covariance path needs to build the continuous F_c.
   virtual void update(const Vector3& measuredAcc, const Vector3& measuredOmega,
-                      const double dt, Matrix9* A, Matrix93* B,
-                      Matrix93* C) = 0;
+                      const double dt, Matrix9* A, Matrix93* B, Matrix93* C,
+                      Vector3* correctedAcc = nullptr,
+                      Vector3* correctedOmega = nullptr) = 0;
 
   /// Convenience overload without Jacobian outputs.
   virtual void integrateMeasurement(const Vector3& measuredAcc,

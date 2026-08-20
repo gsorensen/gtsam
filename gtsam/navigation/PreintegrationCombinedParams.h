@@ -43,7 +43,7 @@ namespace gtsam {
 ///
 /// For GaussMarkovBias (1st-order Gauss-Markov):
 ///   F_bias = diag(exp(-dt/tauAcc)*I3, exp(-dt/tauGyro)*I3)
-///   Q_d    = Q_c * (1 - exp(-2*dt/tau)) / 2
+///   Q_d    = Q_c * (tau/2) * (1 - exp(-2*dt/tau))
 ///
 template <class BIAS = imuBias::ConstantBias>
 struct GTSAM_EXPORT PreintegrationCombinedParamsT : PreintegrationParams {

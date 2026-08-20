@@ -97,6 +97,36 @@ class GTSAM_EXPORT GaussMarkovBias {
     return measurement - beta * biasGyro_;
   }
 
+  /// Frozen (beta = 1) correction, mirroring ConstantBias. Debiases with the
+  /// current bias value and no mean-reversion decay. This is what in-window
+  /// IMU preintegration uses (the GM decay belongs to the between-states bias
+  /// factor and the covariance, not to the in-window measurement correction).
+  Vector3 correctAccelerometer(const Vector3& measurement,
+                               OptionalJacobian<3, 6> H1 = {},
+                               OptionalJacobian<3, 3> H2 = {}) const {
+    if (H1) (*H1) << -I_3x3, Z_3x3;
+    if (H2) (*H2) << I_3x3;
+    return measurement - biasAcc_;
+  }
+
+  Vector3 correctGyroscope(const Vector3& measurement,
+                           OptionalJacobian<3, 6> H1 = {},
+                           OptionalJacobian<3, 3> H2 = {}) const {
+    if (H1) (*H1) << Z_3x3, -I_3x3;
+    if (H2) (*H2) << I_3x3;
+    return measurement - biasGyro_;
+  }
+
+  /// Mean-propagated bias after `elapsed` seconds under the GM dynamics:
+  ///   b(t) = diag(exp(-elapsed/tauAcc), exp(-elapsed/tauGyro)) * b.
+  /// OUTPUT ONLY (e.g. reporting a mid-window bias estimate). This is NOT used
+  /// to debias IMU measurements in-window — that uses the frozen b_i.
+  GaussMarkovBias predicted(double elapsed) const {
+    return GaussMarkovBias(std::exp(-elapsed / tauAcc_) * biasAcc_,
+                           std::exp(-elapsed / tauGyro_) * biasGyro_, tauAcc_,
+                           tauGyro_);
+  }
+
   /// @name Testable
   /// @{
 
@@ -208,6 +238,10 @@ class GTSAM_EXPORT ConstantBias {
     if (H2) (*H2) << I_3x3;
     return measurement - biasGyro_;
   }
+
+  /// A constant bias does not evolve; returns *this. Mirrors the GM API so
+  /// generic code can query a mean-propagated bias uniformly.
+  ConstantBias predicted(double /*elapsed*/) const { return *this; }
 
   /// @name Testable
   /// @{

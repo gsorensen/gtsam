@@ -111,6 +111,12 @@ struct Options {
   double duration = 0.0;       // Run-length cap in seconds; 0 = run to end.
   bool init_from_truth = false;  // When true, initialise state from truth
                                  // (auto-enabled for Aiding::None).
+
+  // SE_2(3)-only knobs (ignored for --preint legacy).
+  gtsam::SE23CovarianceMethod cov_method =
+      gtsam::SE23CovarianceMethod::Brossard;
+  gtsam::SE23IncrementModel increment =
+      gtsam::SE23IncrementModel::SimpleGlobalAcc;
 };
 
 // ============================================================================
@@ -400,7 +406,14 @@ void run_estimation(const SimulationData& sd, const Options& opts) {
   smoother.update(graph, values, timestamps);
 
   // --- Preintegrator ---
-  auto preintegrated = std::make_shared<PIM>(p, prior_bias);
+  std::shared_ptr<PIM> preintegrated;
+  if constexpr (UseSE23) {
+    preintegrated = std::make_shared<PIM>(
+        p, prior_bias, Eigen::Matrix<double, 15, 15>::Zero(), opts.increment,
+        opts.cov_method);
+  } else {
+    preintegrated = std::make_shared<PIM>(p, prior_bias);
+  }
 
   // Previous state (rolled forward). For SE23 it's an ExtendedPose3; for
   // legacy we keep a NavState composed of (pose, vel).
@@ -858,6 +871,9 @@ void print_usage(const char* prog) {
       << "  --aiding {gnss|pars|none} aiding scheme (default: pars)\n"
       << "                           none = IMU-only; auto-enables init\n"
       << "                                  from ground truth\n"
+      << "  --covmethod {brossard|ours|vanloan}  se23 process-noise method\n"
+      << "                           (default: brossard)\n"
+      << "  --increment {simple|full}  se23 increment model (default: simple)\n"
       << "  --duration <seconds>     cap run length (0 = full data, default 0)\n"
       << "  --with-noise|--no-noise  use the _noisy input variant (default on);\n"
       << "                           --no-noise selects the noiseless data\n"
@@ -903,6 +919,30 @@ bool parse_args(int argc, char** argv, Options& opts) {
       if (v == "se23") opts.use_se23 = true;
       else if (v == "legacy") opts.use_se23 = false;
       else { std::cerr << "Unknown --preint value: " << v << "\n"; return false; }
+    } else if (a == "--covmethod") {
+      if (!need_value(i, a)) return false;
+      std::string v = argv[++i];
+      if (v == "brossard")
+        opts.cov_method = gtsam::SE23CovarianceMethod::Brossard;
+      else if (v == "ours")
+        opts.cov_method = gtsam::SE23CovarianceMethod::Ours;
+      else if (v == "vanloan")
+        opts.cov_method = gtsam::SE23CovarianceMethod::VanLoan;
+      else {
+        std::cerr << "Unknown --covmethod value: " << v << "\n";
+        return false;
+      }
+    } else if (a == "--increment") {
+      if (!need_value(i, a)) return false;
+      std::string v = argv[++i];
+      if (v == "simple")
+        opts.increment = gtsam::SE23IncrementModel::SimpleGlobalAcc;
+      else if (v == "full")
+        opts.increment = gtsam::SE23IncrementModel::ConstantBodyImu;
+      else {
+        std::cerr << "Unknown --increment value: " << v << "\n";
+        return false;
+      }
     } else if (a == "--aiding") {
       if (!need_value(i, a)) return false;
       std::string v = argv[++i];

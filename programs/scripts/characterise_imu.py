@@ -10,7 +10,14 @@ Reads df_flat_data.csv and produces:
         - RRW  (rate random walk, rad/s/sqrt(s))               -- slope +1/2
         - Bias instability (rad/s)                              -- flat min
      These map directly to the sigmas consumed by GTSAM's PreintegrationParams.
-  3. Optional bias-observability view (if --debug is supplied): overlays
+  3. Gauss-Markov bias correlation time tau, two ways (cross-checked):
+        - Allan-deviation bump:   tau_c = T_peak / 1.89
+        - Bias autocorrelation:   exp(-t/tau) fit at lag > 0
+     These feed T_acc / T_ars in run_bledar (currently 3600 s, a placeholder).
+     A long static window is required: a first-order GM tau of T seconds needs
+     a record of at least a few * T. The report prints the max resolvable tau
+     for the chosen window and warns when an estimate is near that ceiling.
+  4. Optional bias-observability view (if --debug is supplied): overlays
      bg_z(t), truth yaw-rate, and yaw-error on a shared axis.
 
 Static window is auto-detected as the earliest contiguous window with
@@ -38,25 +45,43 @@ DEFAULT_DIR = Path.home() / "ws/ntnu/parnav/parnav-scripts/post_processing"
 # Static-window auto-detection
 # ---------------------------------------------------------------------------
 
-def find_static_window(t, w_m, min_s=20.0, stride_s=1.0):
-    """Return (t_start, t_end) of lowest-gyro-magnitude contiguous window.
+def find_static_window(t, w_m, min_s=20.0, win_s=1.0):
+    """Return (t_start, t_end, rms) of the LONGEST contiguous static window.
 
-    Uses a sliding-window RMS of |w_m|. The window of length min_s with the
-    lowest RMS is picked. Stride is stride_s (coarse) -- good enough for
-    auto-pick; user can override with --static-start/--static-end.
+    Computes |w_m| RMS in short win_s blocks, thresholds at 3x the quietest
+    block, and returns the longest contiguous run below it. This adapts to
+    however much static data exists -- a fixed-length lowest-RMS search can
+    straddle takeoff and silently mix in motion. `min_s` is used only to warn
+    when the detected static run is shorter than that. Override with
+    --static-start / --static-end.
     """
     dt = np.median(np.diff(t))
-    nwin = int(round(min_s / dt))
-    nstride = max(1, int(round(stride_s / dt)))
+    nb = max(1, int(round(win_s / dt)))
     mag = np.linalg.norm(w_m, axis=0)
-    best_rms = np.inf
-    best_i0 = 0
-    for i0 in range(0, len(mag) - nwin, nstride):
-        rms = np.sqrt(np.mean(mag[i0:i0 + nwin] ** 2))
-        if rms < best_rms:
-            best_rms = rms
-            best_i0 = i0
-    return t[best_i0], t[best_i0 + nwin - 1], best_rms
+    nblk = len(mag) // nb
+    rms = np.sqrt(np.mean(mag[:nblk * nb].reshape(nblk, nb) ** 2, axis=1))
+    below = rms < 3.0 * rms.min()
+
+    best = (0, 0)
+    i = 0
+    while i < nblk:
+        if below[i]:
+            j = i
+            while j + 1 < nblk and below[j + 1]:
+                j += 1
+            if (j - i) > (best[1] - best[0]):
+                best = (i, j)
+            i = j + 1
+        else:
+            i += 1
+    i0 = best[0] * nb
+    i1 = min((best[1] + 1) * nb - 1, len(mag) - 1)
+    seg_rms = float(np.sqrt(np.mean(mag[i0:i1 + 1] ** 2)))
+    if (t[i1] - t[i0]) < min_s:
+        print(f"  WARNING: longest static run is only {t[i1] - t[i0]:.1f}s "
+              f"(< min_s={min_s}); GM tau above ~{(t[i1]-t[i0])/4/1.89:.1f}s "
+              f"is unresolvable.")
+    return t[i0], t[i1], seg_rms
 
 
 # ---------------------------------------------------------------------------
@@ -168,9 +193,60 @@ def fit_allan_params(tau, adev):
     return arw, rrw, bi
 
 
+# ---------------------------------------------------------------------------
+# Gauss-Markov bias correlation time
+# ---------------------------------------------------------------------------
+
+def tau_from_allan_peak(tau, adev):
+    """First-order Gauss-Markov correlation time from the Allan-deviation bump.
+
+    A 1st-order GM process peaks in the Allan variance at averaging time
+    T_peak = 1.89 * tau_c, so tau_c = T_peak / 1.89. The bump sits at tau
+    LONGER than the bias-instability floor (the AD minimum); the search starts
+    there so the short-tau white-noise roll-off is not mistaken for the peak.
+
+    Returns (tau_c, T_peak, resolved). resolved=False if the peak lands on the
+    largest averaging time (AD still rising -> no GM bump inside the window: the
+    record is too short, or the bias is closer to a random walk).
+    """
+    i_floor = int(np.argmin(adev))
+    i_peak = i_floor + int(np.argmax(adev[i_floor:]))
+    resolved = i_floor < i_peak < len(tau) - 1
+    return tau[i_peak] / 1.89, tau[i_peak], resolved
+
+
+def tau_from_autocorr(x, fs, ac_floor=0.1):
+    """GM correlation time from the bias autocorrelation.
+
+    White measurement noise is uncorrelated, so it only inflates lag 0; the
+    normalized autocorrelation at lag >= 1 sample reflects the slow bias. Fit
+    exp(-t/tau) (log-linear) over the lags where the AC is still well above the
+    noise (AC > ac_floor), excluding lag 0.
+
+    Returns tau [s], or nan if no decaying correlation is found.
+    """
+    x = np.asarray(x, float)
+    x = x - x.mean()
+    n = len(x)
+    max_lag = max(8, n // 5)
+    ac = np.correlate(x, x, mode="full")[n - 1: n - 1 + max_lag]
+    if ac[0] <= 0:
+        return float("nan")
+    ac = ac / ac[0]
+    lags = np.arange(len(ac)) / fs
+    good = np.arange(1, len(ac))
+    good = good[ac[good] > ac_floor]
+    if len(good) < 5:
+        return float("nan")
+    slope, _ = np.polyfit(lags[good], np.log(ac[good]), 1)
+    return (-1.0 / slope) if slope < 0 else float("nan")
+
+
 def plot_allan(w_m_static, f_m_static, fs, out_dir):
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     params = {"gyro": [], "accel": []}
+    gm = {"gyro": [], "accel": []}  # (axis, tau_peak, resolved, tau_autocorr)
+    tau_grid_max = 0.0
 
     for col, (name, unit) in enumerate([
         ("gyro",  r"$\sigma_y$ [rad/s]"),
@@ -180,9 +256,15 @@ def plot_allan(w_m_static, f_m_static, fs, out_dir):
         sig = w_m_static if name == "gyro" else f_m_static
         for axis_i, axis_n in enumerate(["x", "y", "z"]):
             tau, adev = allan_variance(sig[axis_i], fs)
+            tau_grid_max = max(tau_grid_max, tau[-1])
             ax.loglog(tau, adev, label=f"{name}_{axis_n}", lw=0.8)
             arw, rrw, bi = fit_allan_params(tau, adev)
             params[name].append((axis_n, arw, rrw, bi))
+            tau_pk, T_pk, resolved = tau_from_allan_peak(tau, adev)
+            tau_ac = tau_from_autocorr(sig[axis_i], fs)
+            gm[name].append((axis_n, tau_pk, resolved, tau_ac))
+            if resolved:
+                ax.axvline(T_pk, color="0.6", lw=0.5, ls=":")
         ax.set_xlabel(r"$\tau$ [s]")
         ax.set_ylabel(unit)
         ax.set_title(f"Allan deviation — {name}")
@@ -197,8 +279,6 @@ def plot_allan(w_m_static, f_m_static, fs, out_dir):
     print("\n=== Allan-variance-derived IMU params ===")
     print(f"{'axis':<8}{'ARW':>14}{'RRW':>16}{'BiasInstab':>18}")
     for name in ("gyro", "accel"):
-        unit_arw = "rad/√s" if name == "gyro" else "(m/s²)/√s"
-        unit_rrw = "rad/s/√s" if name == "gyro" else "(m/s²)/s/√s ... effectively bias walk"
         for axis_n, arw, rrw, bi in params[name]:
             print(f"{name}_{axis_n:<6}{arw:>14.4e}{rrw:>16.4e}{bi:>18.4e}")
     print("\nMap to GTSAM PreintegrationParams:")
@@ -206,6 +286,38 @@ def plot_allan(w_m_static, f_m_static, fs, out_dir):
     print("  biasOmegaCovariance      ~ (RRW_gyro)^2   per axis")
     print("  accelerometerCovariance  ~ (ARW_accel)^2  per axis")
     print("  biasAccCovariance        ~ (RRW_accel)^2  per axis")
+
+    # Gauss-Markov correlation time.
+    tau_ceiling = tau_grid_max / 1.89
+    print("\n=== Gauss-Markov bias correlation time tau ===")
+    print(f"{'axis':<8}{'tau_AllanPeak[s]':>18}{'resolved':>10}"
+          f"{'tau_autocorr[s]':>18}")
+    med = {}
+    for name in ("gyro", "accel"):
+        resolved_taus = []
+        for axis_n, tau_pk, resolved, tau_ac in gm[name]:
+            flag = "yes" if resolved else "NO(ceil)"
+            pk = f"{tau_pk:>18.2f}" if resolved else f"{'>'+f'{tau_pk:.1f}':>18}"
+            ac = f"{tau_ac:>18.2f}" if np.isfinite(tau_ac) else f"{'--':>18}"
+            print(f"{name}_{axis_n:<6}{pk}{flag:>10}{ac}")
+            if resolved:
+                resolved_taus.append(tau_pk)
+            if np.isfinite(tau_ac):
+                resolved_taus.append(tau_ac)
+        med[name] = float(np.median(resolved_taus)) if resolved_taus else \
+            float("nan")
+
+    print(f"\nMax resolvable tau from this window ~ tau_max/1.89 = "
+          f"{tau_ceiling:.1f} s")
+    print("Suggested run_bledar time constants (median of finite estimates):")
+    print(f"  T_ars (gyro bias)  ~ {med['gyro']:.1f} s")
+    print(f"  T_acc (accel bias) ~ {med['accel']:.1f} s")
+    for name, label in (("gyro", "T_ars"), ("accel", "T_acc")):
+        if np.isfinite(med[name]) and med[name] > 0.5 * tau_ceiling:
+            print(f"  WARNING: {label} estimate ({med[name]:.1f}s) is near the "
+                  f"{tau_ceiling:.1f}s ceiling -> extend the static window "
+                  f"(--static-min-s / --static-end) for a reliable value.")
+    print("  (run_bledar currently hardcodes T_acc = T_ars = 3600 s.)")
     return params
 
 
@@ -272,6 +384,9 @@ def main():
                     help="Override static-window start [s].")
     ap.add_argument("--static-end", type=float, default=None,
                     help="Override static-window end [s].")
+    ap.add_argument("--static-min-s", type=float, default=60.0,
+                    help="Auto static-window length [s]. Longer is better for "
+                         "the GM tau estimate (needs a few * tau of data).")
     ap.add_argument("--cruise-start", type=float, default=None)
     ap.add_argument("--cruise-end", type=float, default=None)
     args = ap.parse_args()
@@ -279,6 +394,13 @@ def main():
 
     print(f"Loading {args.data} ...")
     df = pd.read_csv(args.data)
+    # Accept both schemas: df_flat (t, w_m_*, f_m_*) and the BLEDAR export
+    # (time, gyro_*, acc_*).
+    df = df.rename(columns={
+        "time": "t",
+        "gyro_x": "w_m_1", "gyro_y": "w_m_2", "gyro_z": "w_m_3",
+        "acc_x": "f_m_1", "acc_y": "f_m_2", "acc_z": "f_m_3",
+    })
     t = df.t.to_numpy()
     w_m = df[["w_m_1", "w_m_2", "w_m_3"]].to_numpy().T
     f_m = df[["f_m_1", "f_m_2", "f_m_3"]].to_numpy().T
@@ -291,7 +413,7 @@ def main():
         static_t = (args.static_start, args.static_end)
         print(f"Static window (user): [{static_t[0]:.2f},{static_t[1]:.2f}] s")
     else:
-        s0, s1, rms = find_static_window(t, w_m, min_s=20.0)
+        s0, s1, rms = find_static_window(t, w_m, min_s=args.static_min_s)
         static_t = (s0, s1)
         print(f"Static window (auto): [{s0:.2f},{s1:.2f}] s  "
               f"|w| rms={rms:.4e} rad/s")

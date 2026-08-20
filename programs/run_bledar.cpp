@@ -82,8 +82,22 @@ struct Options {
 
   double acc_noise_scaling = 33.0;
   double gyro_noise_scaling = 100.0;
-  double bias_scaling = 50.0;
+  double bias_scaling = 1.0;  // datasheet-true stationary bias sigma
   bool use_music = false;
+
+  // Gauss-Markov bias correlation times [s], independent per channel (only used
+  // for --bias gm; ConstantBias keeps a fixed reference). PLACEHOLDER defaults
+  // pending the consistency/RMSE tau sweep -- the STIM300's true correlation
+  // times are long and not resolvable from the 224 s flight-static window, so
+  // set these via --bias-tau-{acc,gyro}.
+  double bias_tau_acc = 3600.0;
+  double bias_tau_gyro = 3600.0;
+
+  // SE_2(3)-only knobs (ignored for --preint se3).
+  gtsam::SE23CovarianceMethod cov_method =
+      gtsam::SE23CovarianceMethod::Brossard;
+  gtsam::SE23IncrementModel increment =
+      gtsam::SE23IncrementModel::SimpleGlobalAcc;
 };
 
 static void print_usage(const char* prog) {
@@ -91,15 +105,23 @@ static void print_usage(const char* prog) {
       << "Usage: " << prog << " [options]\n"
       << "  --preint {se3|se23}         state parameterisation (default se3)\n"
       << "  --bias   {cb|gm}            bias model (default cb)\n"
+      << "  --bias-tau-acc <s>         GM accel-bias correlation time "
+         "(default 3600)\n"
+      << "  --bias-tau-gyro <s>        GM gyro-bias correlation time "
+         "(default 3600); gm only\n"
       << "  --aiding {gnss|pars|uwb}    aiding source (default gnss)\n"
       << "  --switch-time <s>           pars/uwb: GNSS bootstrap until <s>\n"
       << "                              then switch to pars/uwb (default 400)\n"
       << "  --robust {none|gm|tukey}    robust kernel (default none)\n"
+      << "  --covmethod {brossard|ours|vanloan}  se23 process-noise method\n"
+      << "                              (default brossard)\n"
+      << "  --increment {simple|full}   se23 increment model (default simple)\n"
       << "  --base-path <path>          per-sensor CSV folder\n"
       << "  --output-dir <path>         result CSV directory\n"
       << "  --acc-noise-scaling <s>     (default 33)\n"
       << "  --gyro-noise-scaling <s>    (default 100)\n"
-      << "  --bias-scaling <s>          (default 50)\n"
+      << "  --bias-scaling <s>          inflate datasheet bias sigma "
+         "(default 1)\n"
       << "  --use-music                 use the _root dataset variant\n"
       << "  -h, --help\n";
 }
@@ -129,6 +151,12 @@ static bool parse_args(int argc, char** argv, Options& o) {
       if (v == "gm") o.use_gm = true;
       else if (v == "cb") o.use_gm = false;
       else { std::cerr << "Unknown --bias " << v << "\n"; return false; }
+    } else if (a == "--bias-tau-acc") {
+      if (!need(i, "--bias-tau-acc")) return false;
+      o.bias_tau_acc = std::stod(argv[++i]);
+    } else if (a == "--bias-tau-gyro") {
+      if (!need(i, "--bias-tau-gyro")) return false;
+      o.bias_tau_gyro = std::stod(argv[++i]);
     } else if (a == "--aiding") {
       if (!need(i, "--aiding")) return false;
       std::string v = argv[++i];
@@ -146,6 +174,22 @@ static bool parse_args(int argc, char** argv, Options& o) {
       else if (v == "gm") o.robust = Robust::GemanMcClure;
       else if (v == "tukey") o.robust = Robust::Tukey;
       else { std::cerr << "Unknown --robust " << v << "\n"; return false; }
+    } else if (a == "--covmethod") {
+      if (!need(i, "--covmethod")) return false;
+      std::string v = argv[++i];
+      if (v == "brossard") o.cov_method = gtsam::SE23CovarianceMethod::Brossard;
+      else if (v == "ours") o.cov_method = gtsam::SE23CovarianceMethod::Ours;
+      else if (v == "vanloan")
+        o.cov_method = gtsam::SE23CovarianceMethod::VanLoan;
+      else { std::cerr << "Unknown --covmethod " << v << "\n"; return false; }
+    } else if (a == "--increment") {
+      if (!need(i, "--increment")) return false;
+      std::string v = argv[++i];
+      if (v == "simple")
+        o.increment = gtsam::SE23IncrementModel::SimpleGlobalAcc;
+      else if (v == "full")
+        o.increment = gtsam::SE23IncrementModel::ConstantBodyImu;
+      else { std::cerr << "Unknown --increment " << v << "\n"; return false; }
     } else if (a == "--base-path") {
       if (!need(i, "--base-path")) return false;
       o.base_path = argv[++i];
@@ -368,20 +412,36 @@ void run_estimation(const Data& d, const Options& opts) {
   // --- IMU noise ---
   const double g0 = 9.80665;
   const double vrw = 0.07, arw = 0.15;
-  const double bias_instability_acc = 0.05;  // milli g
-  const double bias_instability_ars = 0.5;   // deg/hour
-  const double T_acc = 3600.0, T_ars = 3600.0;
+
+  // GM bias correlation times [s], INDEPENDENT per channel. Tunable for
+  // GaussMarkovBias (--bias-tau-{acc,gyro}); fixed 3600 s reference for
+  // ConstantBias (so tuning tau does not move the CB baseline). These feed BOTH
+  // q_b (= 2 sigma^2 / tau) and the GaussMarkovBias constructor.
+  constexpr bool kIsGM = std::is_same_v<BIAS, gtsam::imuBias::GaussMarkovBias>;
+  const double T_acc = kIsGM ? opts.bias_tau_acc : 3600.0;
+  const double T_ars = kIsGM ? opts.bias_tau_gyro : 3600.0;
+
+  // Stationary bias variance from the STIM300 datasheet Allan floor:
+  //   B = ASD_min / 0.664 ,  sigma_b^2 = 2 * B^2 * ln(2) / pi   (bias instab.).
+  // ASD_min: gyro 0.325 deg/h (Fig 6-5), accel 0.04 mg (Fig 6-13, 10g unit).
+  const double mg = g0 * 1e-3;
+  const double B_gyro = 0.325 / 0.664;  // deg/h
+  const double B_acc = 0.04 / 0.664;    // mg
+  const double sig2_bg = 2.0 * B_gyro * B_gyro * std::log(2.0) / M_PI *
+                         std::pow(deg2rad(1.0 / 3600.0), 2.0);  // (rad/s)^2
+  const double sig2_ba = 2.0 * B_acc * B_acc * std::log(2.0) / M_PI *
+                         (mg * mg);  // (m/s^2)^2
+
   const double q_v = std::pow(opts.acc_noise_scaling * vrw / 60.0, 2.0);
   const double q_o =
       std::pow((opts.gyro_noise_scaling * arw / 60.0) * deg2rad(1.0), 2.0);
+  // Driving PSD q = 2 sigma^2 / tau; bias_scaling inflates the stationary sigma
+  // (so variance scales by bias_scaling^2). With the datasheet sigma above, the
+  // physically-true run is --bias-scaling 1.
   const double q_b_v =
-      (2.0 / T_acc) *
-      std::pow(opts.bias_scaling * bias_instability_acc * (g0 / 1000.0), 2.0);
+      (2.0 / T_acc) * std::pow(opts.bias_scaling, 2.0) * sig2_ba;
   const double q_b_o =
-      (2.0 / T_ars) *
-      std::pow((opts.bias_scaling * bias_instability_ars / 3600.0) *
-                   deg2rad(1.0),
-               2.0);
+      (2.0 / T_ars) * std::pow(opts.bias_scaling, 2.0) * sig2_bg;
 
   auto p = gtsam::PreintegrationCombinedParamsT<BIAS>::MakeSharedD(g0);
   p->accelerometerCovariance = gtsam::I_3x3 * q_v;
@@ -499,7 +559,14 @@ void run_estimation(const Data& d, const Options& opts) {
     }
 
   // --- Loop ---
-  auto preintegrated = std::make_shared<PIM>(p, prior_bias);
+  std::shared_ptr<PIM> preintegrated;
+  if constexpr (UseSE23) {
+    preintegrated = std::make_shared<PIM>(
+        p, prior_bias, Eigen::Matrix<double, 15, 15>::Zero(), opts.increment,
+        opts.cov_method);
+  } else {
+    preintegrated = std::make_shared<PIM>(p, prior_bias);
+  }
   StateType prev_state = [&] {
     if constexpr (UseSE23) return gtsam::ExtendedPose3(R0, v0, p0);
     else return gtsam::NavState(pose0, v0);

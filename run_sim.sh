@@ -8,10 +8,19 @@
 #   SE23 + GM   -> gtsam_fork_test_gm_se23.csv
 #
 # Usage:
-#   ./run_sim.sh [--aiding gnss|pars|none] [--output-dir DIR]
+#   ./run_sim.sh [--aiding gnss|pars|none]
+#                [--method brossard|ours-simple|ours-full|vanloan]
+#                [--output-dir DIR]
 #                [--rmse group|axis|all|none] [--latex-dir DIR]
 #                [--with-noise|--no-noise] [--with-bias|--no-bias]
 #                [--aiding-hz N] [--duration SEC] [-- <extra sim args...>]
+#
+# --method selects the SE_2(3) preset for the two se23 runs (the legacy runs
+#   ignore it). Each preset is a (covariance method, increment model) pair:
+#     brossard     = Brossard gain covariance + simple (global-acc) increment
+#     ours-simple  = 4th-order series covariance    + simple increment
+#     ours-full    = 4th-order series covariance    + full (body-IMU) increment
+#     vanloan      = exact Van Loan covariance      + full increment
 #
 # --rmse selects the RMSE table granularity in the plot output:
 #   group (default) = 5 substates, axis = 15 per-axis,
@@ -40,6 +49,10 @@ BIN="${BIN:-$REPO/_build/programs/SimulationFixedLagSmoother}"
 PLOTTER="$REPO/visualisations/plot_3sigma.py"
 
 AIDING="pars"
+METHOD=""              # se23 preset: brossard | ours-simple | ours-full |
+                       # vanloan. Each maps to a (covmethod, increment) pair
+                       # (empty -> binary defaults = brossard + simple).
+                       # Applies to the two se23 runs; the legacy runs ignore it.
 OUTPUT_DIR=""          # empty -> let the binary use its default dir
 RMSE="group"           # RMSE table granularity: group|axis|none
 FIG_DIR=""             # empty -> plotter default (Overleaf .../figures)
@@ -52,6 +65,7 @@ EXTRA=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --aiding)     AIDING="$2"; shift 2 ;;
+    --method)     METHOD="$2"; shift 2 ;;
     --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
     --rmse)       RMSE="$2"; shift 2 ;;
     --fig-dir)    FIG_DIR="$2"; shift 2 ;;
@@ -69,6 +83,18 @@ done
 
 case "$AIDING" in gnss|pars|none) ;; *)
   echo "Invalid --aiding: $AIDING (expected gnss|pars|none)" >&2; exit 1 ;;
+esac
+
+# Map the preset to a (covmethod, increment) pair (the derivation fixes which
+# increment goes with which covariance). se23 runs use it; legacy ignores it.
+case "$METHOD" in
+  "")           ;;  # unset -> binary defaults (brossard + simple)
+  brossard)     BIN_ARGS+=(--covmethod brossard --increment simple) ;;
+  ours-simple)  BIN_ARGS+=(--covmethod ours     --increment simple) ;;
+  ours-full)    BIN_ARGS+=(--covmethod ours     --increment full)   ;;
+  vanloan)      BIN_ARGS+=(--covmethod vanloan  --increment full)   ;;
+  *) echo "Invalid --method: $METHOD" \
+          "(expected brossard|ours-simple|ours-full|vanloan)" >&2; exit 1 ;;
 esac
 
 # Scenario subfolder for figures/tables (sim/<scenario>).

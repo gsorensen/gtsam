@@ -55,6 +55,35 @@ std::shared_ptr<PreintegrationCombinedParamsT<GMBias>> CombinedParamsGM() {
 }  // namespace
 
 /* ************************************************************************* */
+// The three covariance methods must all yield SPD covariances; Ours and Van
+// Loan agree to high order, Brossard is close but measurably different.
+TEST(CombinedImuFactor2, CovarianceMethodsAgree) {
+  auto p = CombinedParamsCB();
+  testing::SomeMeasurements ms;
+  auto build = [&](SE23CovarianceMethod m) {
+    PIM_CB pim(p, imuBias::ConstantBias(),
+               Eigen::Matrix<double, 15, 15>::Zero(),
+               SE23IncrementModel::SimpleGlobalAcc, m);
+    for (const auto& x : ms) pim.integrateMeasurement(x.acc, x.gyro, x.dt);
+    return Matrix(pim.preintMeasCov());
+  };
+  const Matrix Qb = build(SE23CovarianceMethod::Brossard);
+  const Matrix Qo = build(SE23CovarianceMethod::Ours);
+  const Matrix Qv = build(SE23CovarianceMethod::VanLoan);
+
+  for (const Matrix* Q : {&Qb, &Qo, &Qv}) {
+    Eigen::LLT<Matrix> llt(*Q);
+    EXPECT(llt.info() == Eigen::Success);  // SPD
+  }
+  // Ours ~= VanLoan (both high order) at dt = 0.01.
+  EXPECT((Qv - Qo).norm() / Qv.norm() < 1e-6);
+  // Brossard in the same ballpark but distinct (Jensen deficit, O(dt^3)).
+  const double relB = (Qv - Qb).norm() / Qv.norm();
+  EXPECT(relB < 0.05);
+  EXPECT(relB > 1e-9);
+}
+
+/* ************************************************************************* */
 // Zero residual at the predicted state.
 TEST(CombinedImuFactor2, ZeroResidualAtPrediction) {
   auto p = CombinedParamsCB();

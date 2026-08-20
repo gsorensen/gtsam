@@ -20,6 +20,7 @@
 
 #include <gtsam/navigation/ManifoldPreintegrationSE23.h>
 #include <gtsam/navigation/PreintegrationCombinedParams.h>
+#include <gtsam/navigation/SE23CovariancePropagation.h>
 #include <gtsam/nonlinear/NonlinearFactor.h>
 
 #include <ostream>
@@ -42,6 +43,9 @@ class GTSAM_EXPORT PreintegratedCombinedMeasurements2T
   /// 15x15 covariance in [theta, nu, rho, bias_acc, bias_gyro] order.
   Eigen::Matrix<double, 15, 15> preintMeasCov_;
 
+  /// Discrete process-noise method (Brossard / Ours / VanLoan).
+  SE23CovarianceMethod covMethod_ = SE23CovarianceMethod::Brossard;
+
   template <class PIM, class BIAS>
   friend class CombinedImuFactor2T;
 
@@ -55,10 +59,17 @@ class GTSAM_EXPORT PreintegratedCombinedMeasurements2T
   PreintegratedCombinedMeasurements2T(
       const std::shared_ptr<Params>& p, const BiasType& biasHat = BiasType(),
       const Eigen::Matrix<double, 15, 15>& preintMeasCov =
-          Eigen::Matrix<double, 15, 15>::Zero())
-      : PreintegrationType(p, biasHat), preintMeasCov_(preintMeasCov) {
+          Eigen::Matrix<double, 15, 15>::Zero(),
+      SE23IncrementModel incrementModel = SE23IncrementModel::SimpleGlobalAcc,
+      SE23CovarianceMethod covMethod = SE23CovarianceMethod::Brossard)
+      : PreintegrationType(p, biasHat, incrementModel),
+        preintMeasCov_(preintMeasCov),
+        covMethod_(covMethod) {
     this->PreintegrationType::resetIntegration();
   }
+
+  /// Which discrete process-noise method this preintegrator uses.
+  SE23CovarianceMethod covMethod() const { return covMethod_; }
 
   PreintegratedCombinedMeasurements2T(
       const PreintegrationType& base,
@@ -155,42 +166,44 @@ void PreintegratedCombinedMeasurements2T<PreintegrationType, BiasType>::
 
   // 1. Underlying SE_2(3) state update + per-step Jacobians.
   //    A : 9x9 tangent transition; B : 9x3 d(xi_inc)/d(acc); C : 9x3 d(xi_inc)/d(omega).
+  //    f_hat/w_hat are the corrected specific force / rate (for the continuous
+  //    covariance methods).
   Matrix9 A;
   Matrix93 B, C;
-  PreintegrationType::update(measuredAcc, measuredOmega, dt, &A, &B, &C);
+  Vector3 f_hat, w_hat;
+  PreintegrationType::update(measuredAcc, measuredOmega, dt, &A, &B, &C, &f_hat,
+                             &w_hat);
 
   // Row blocks for the SE_2(3) tangent: [0..2] theta, [3..5] nu, [6..8] rho.
   const Matrix3 theta_H_omega = C.topRows<3>();
   const Matrix3 nu_H_acc = B.middleRows<3>(3);
   const Matrix3 rho_H_acc = B.bottomRows<3>();
 
-  // 2. Build 15x15 transition F in [theta, nu, rho, ba, bg] order.
-  Eigen::Matrix<double, 15, 15> F;
-  F.setZero();
-  F.block<9, 9>(0, 0) = A;
+  // 2. Build the full 15x15 transition A_i in [theta, nu, rho, ba, bg] order.
+  //    Its top-left 9x9 block is the SE_2(3) transition A returned by update().
+  Eigen::Matrix<double, 15, 15> A_i;
+  A_i.setZero();
+  A_i.block<9, 9>(0, 0) = A;
 
-  // Off-diagonal state/bias coupling. For ConstantBias, d(corrected)/d(bias) = -I,
-  // but F's off-diag gets the *positive* measurement Jacobian (sign cancels via F P F^T).
-  // For GaussMarkovBias, chain in the beta_* decay factors.
-  if constexpr (std::is_same_v<BiasType, imuBias::GaussMarkovBias>) {
-    const double t_k = this->deltaTij_ - dt;
-    const double beta_acc = std::exp(-t_k / this->biasHat_.tauAcc());
-    const double beta_omega = std::exp(-t_k / this->biasHat_.tauGyro());
-    F.block<3, 3>(0, 12) = beta_omega * theta_H_omega;
-    F.block<3, 3>(3, 9) = beta_acc * nu_H_acc;
-    F.block<3, 3>(6, 9) = beta_acc * rho_H_acc;
-  } else {
-    F.block<3, 3>(0, 12) = theta_H_omega;
-    F.block<3, 3>(3, 9) = nu_H_acc;
-    F.block<3, 3>(6, 9) = rho_H_acc;
-  }
+  // Off-diagonal pose<->bias coupling. d(corrected)/d(bias) = -I (beta = 1),
+  // because the IMU is debiased with the FROZEN window-start bias b_i for BOTH
+  // bias types (see ManifoldPreintegrationSE23::update). The off-diag gets the
+  // *positive* measurement Jacobian (sign cancels via A_i P A_i^T). The
+  // bias-block self-decay (GM mean reversion) lives in A_i.block<6,6>(9,9)
+  // below, NOT here.
+  // ALT (disabled): mid-window GM mean reversion scaled the coupling by
+  //   beta_* = exp(-(deltaTij_-dt)/tau_*):
+  //     A_i.block<3,3>(0,12) = beta_omega * theta_H_omega; etc.
+  A_i.block<3, 3>(0, 12) = theta_H_omega;  // theta <- b_gyro
+  A_i.block<3, 3>(3, 9) = nu_H_acc;        // nu    <- b_acc
+  A_i.block<3, 3>(6, 9) = rho_H_acc;       // rho   <- b_acc
 
   // Bias block transition (identity for ConstantBias, exp(-dt/tau)*I for GM).
-  F.block<6, 6>(9, 9) = this->p().biasFTransition(dt, this->biasHat_);
+  A_i.block<6, 6>(9, 9) = this->p().biasFTransition(dt, this->biasHat_);
 
-  preintMeasCov_ = F * preintMeasCov_ * F.transpose();
+  preintMeasCov_ = A_i * preintMeasCov_ * A_i.transpose();
 
-  // 3. Process-noise injection.
+  // 3. Process-noise injection Q_d, chosen by covMethod_.
   const Matrix3& aCov = this->p().accelerometerCovariance;
   const Matrix3& wCov = this->p().gyroscopeCovariance;
   const Matrix3& iCov = this->p().integrationCovariance;
@@ -198,26 +211,35 @@ void PreintegratedCombinedMeasurements2T<PreintegrationType, BiasType>::
   Eigen::Matrix<double, 15, 15> G_measCov_Gt;
   G_measCov_Gt.setZero();
 
-  // Diagonal blocks.
-  SE23_CIF_D_theta_theta(&G_measCov_Gt) =
-      theta_H_omega * (wCov / dt) * theta_H_omega.transpose();
-  SE23_CIF_D_nu_nu(&G_measCov_Gt) =
-      nu_H_acc * (aCov / dt) * nu_H_acc.transpose();
-  // rho accumulates both the acc-induced term and the integration covariance.
-  SE23_CIF_D_rho_rho(&G_measCov_Gt) =
-      rho_H_acc * (aCov / dt) * rho_H_acc.transpose() + dt * iCov;
-
-  // nu <-> rho correlation (both driven by the same acc noise realisation).
-  SE23_CIF_D_nu_rho(&G_measCov_Gt) =
-      nu_H_acc * (aCov / dt) * rho_H_acc.transpose();
-  SE23_CIF_D_rho_nu(&G_measCov_Gt) =
-      rho_H_acc * (aCov / dt) * nu_H_acc.transpose();
-
-  // Bias process noise.
-  SE23_CIF_D_ba_ba(&G_measCov_Gt) =
-      this->p().discreteBiasAccCovariance(dt, this->biasHat_);
-  SE23_CIF_D_bg_bg(&G_measCov_Gt) =
-      this->p().discreteBiasOmegaCovariance(dt, this->biasHat_);
+  if (covMethod_ == SE23CovarianceMethod::Brossard) {
+    // Discrete gain reconstruction G (Qc/dt) G^T (ref §6c), using the FULL 9x6
+    // G = [B | C]. Exact for SimpleGlobalAcc (the classic block form) and also
+    // captures the ConstantBodyImu gyro->nu, gyro->rho cross terms.
+    G_measCov_Gt.block<9, 9>(0, 0).noalias() =
+        B * (aCov / dt) * B.transpose() + C * (wCov / dt) * C.transpose();
+    G_measCov_Gt.block<3, 3>(6, 6).noalias() += dt * iCov;  // integration r.w.
+    // Bias process noise (GM: discrete OU covariance; CB: Qc*dt).
+    SE23_CIF_D_ba_ba(&G_measCov_Gt) =
+        this->p().discreteBiasAccCovariance(dt, this->biasHat_);
+    SE23_CIF_D_bg_bg(&G_measCov_Gt) =
+        this->p().discreteBiasOmegaCovariance(dt, this->biasHat_);
+  } else {
+    // Continuous-time methods: build F_c, Q~ and integrate over dt. The full
+    // 15x15 Q_d already carries the bias blocks AND the bias<->pose coupling,
+    // so it replaces the block form above wholesale.
+    double biasFcAcc = 0.0, biasFcGyro = 0.0;  // Wiener default
+    if constexpr (std::is_same_v<BiasType, imuBias::GaussMarkovBias>) {
+      biasFcAcc = -1.0 / this->biasHat_.tauAcc();
+      biasFcGyro = -1.0 / this->biasHat_.tauGyro();
+    }
+    const SE23Covariance Fc = se23ContinuousFc(w_hat, f_hat, biasFcAcc, biasFcGyro);
+    const SE23Covariance Qtil = se23ContinuousQtilde(
+        aCov, wCov, iCov, this->p().biasAccCovariance,
+        this->p().biasOmegaCovariance);
+    G_measCov_Gt = (covMethod_ == SE23CovarianceMethod::Ours)
+                       ? se23DiscreteQd_Ours(Fc, Qtil, dt)
+                       : se23DiscreteQd_VanLoan(Fc, Qtil, dt);
+  }
 
   preintMeasCov_.noalias() += G_measCov_Gt;
 }
@@ -240,7 +262,7 @@ void PreintegratedCombinedMeasurements2T<PreintegrationType, BiasType>::
  * `ConstantBias` (Wiener) and `GaussMarkovBias` models.
  *
  * Residual layout (15 x 1): [r_SE23 (9), r_bias (6)].
- * Bias residual: r_bias = F_total * bias_i - bias_j, where
+ * Bias residual: r_bias = bias_j - F_total * bias_i, where
  *   F_total = I_6x6                       (ConstantBias)
  *   F_total = diag(exp(-T/tauAcc)*I3, exp(-T/tauGyro)*I3)  (GaussMarkovBias)
  */
@@ -308,8 +330,9 @@ class GTSAM_EXPORT CombinedImuFactor2T
     const Matrix6 F_total =
         pim_.p().biasFTransition(pim_.deltaTij(), pim_.biasHat());
 
-    // Bias residual: predicted bias_j (= F_total * bias_i) minus actual.
-    const Vector6 fbias = F_total * bias_i.vector() - bias_j.vector();
+    // Bias residual r_bias = b_j - F_total * b_i  (ref §7b):
+    //   d r_bias / d b_j = I ,  d r_bias / d b_i = -F_total.
+    const Vector6 fbias = bias_j.vector() - F_total * bias_i.vector();
 
     Matrix9 D_r_state_i, D_r_state_j;
     Matrix96 D_r_bias_i;
@@ -330,12 +353,12 @@ class GTSAM_EXPORT CombinedImuFactor2T
     if (H3) {
       H3->resize(15, 6);
       H3->block<9, 6>(0, 0) = D_r_bias_i;
-      H3->block<6, 6>(9, 0) = F_total;
+      H3->block<6, 6>(9, 0) = -F_total;  // d r_bias / d b_i
     }
     if (H4) {
       H4->resize(15, 6);
       H4->block<9, 6>(0, 0).setZero();
-      H4->block<6, 6>(9, 0) = -I_6x6;
+      H4->block<6, 6>(9, 0) = I_6x6;  // d r_bias / d b_j
     }
 
     Vector r(15);
