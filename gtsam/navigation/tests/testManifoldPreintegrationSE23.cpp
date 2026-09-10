@@ -234,6 +234,61 @@ TEST(ManifoldPreintegrationSE23, FullModelPredictJacobians) {
 }
 
 /* ************************************************************************* */
+// The ConstantBodyImu model must reproduce the constant-body-force trajectory
+// (its own assumption) at zero noise/bias -- this is the ~1.7 m position bug.
+// Truth is an INDEPENDENT fine numerical integration (no kernel helpers).
+TEST(ManifoldPreintegrationSE23, FullModelReproducesConstantBodyTruth) {
+  auto p = std::make_shared<PreintegrationParams>(Vector3::Zero());  // no gravity
+  p->gyroscopeCovariance = 1e-10 * I_3x3;
+  p->accelerometerCovariance = 1e-10 * I_3x3;
+  p->integrationCovariance = 1e-10 * I_3x3;
+  ManifoldPreintegrationSE23<> pim(p, Bias(),
+                                   SE23IncrementModel::ConstantBodyImu);
+  const Vector3 acc(0.3, -0.2, 0.1), omega(0.4, -0.3, 0.6);  // real rotation
+  const double dt = 0.01;
+  const int N = 100;
+  const double T = N * dt;
+  for (int i = 0; i < N; ++i) pim.integrateMeasurement(acc, omega, dt);
+  const ExtendedPose3 x = pim.predict(ExtendedPose3(), Bias());
+
+  // v(t) = int_0^t R(s) acc ds, p(t) = int_0^t v ds, R(t) = Exp(omega t).
+  const int Nf = 100000;
+  const double h = T / Nf;
+  Vector3 v_t = Vector3::Zero(), p_t = Vector3::Zero();
+  for (int k = 0; k < Nf; ++k) {
+    const Vector3 Rf = Rot3::Expmap(omega * ((k + 0.5) * h)) * acc;
+    p_t += (v_t + 0.5 * Rf * h) * h;
+    v_t += Rf * h;
+  }
+  EXPECT(assert_equal(Rot3::Expmap(omega * T), x.rotation(), 1e-9));
+  EXPECT(assert_equal(v_t, x.velocity(), 1e-4));
+  EXPECT(assert_equal(Point3(p_t), x.position(), 1e-4));
+}
+
+/* ************************************************************************* */
+// Full-model bias Jacobian at LARGE omega (where the old d_p kernel was wrong):
+// analytic J_bias vs FD of re-integration.
+TEST(ManifoldPreintegrationSE23, FullModelBiasJacobianLargeOmega) {
+  const Bias biasHat(Vector3(0.01, -0.02, 0.005),
+                     Vector3(-0.003, 0.004, 0.002));
+  auto build = [](const Bias& b) {
+    ManifoldPreintegrationSE23<> pim(testing::Params(), b,
+                                     SE23IncrementModel::ConstantBodyImu);
+    const Vector3 acc(0.05, 0.09, 0.01), omega(0.4, -0.3, 0.6);
+    for (int i = 0; i < 30; ++i) pim.integrateMeasurement(acc, omega, 0.01);
+    return pim;
+  };
+  auto pim = build(biasHat);
+  Matrix96 H;
+  pim.biasCorrectedDelta(biasHat, H);
+  std::function<Vector9(const Bias&)> f = [&](const Bias& b) {
+    return ExtendedPose3::Logmap(build(b).deltaXij());
+  };
+  EXPECT(assert_equal(numericalDerivative11<Vector9, Bias>(f, biasHat),
+                      Matrix(H), 1e-5));
+}
+
+/* ************************************************************************* */
 int main() {
   TestResult tr;
   return TestRegistry::runAllTests(tr);

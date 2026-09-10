@@ -60,9 +60,11 @@ using gtsam::symbol_shorthand::X;
 // Configuration
 // ============================================================================
 
-/// Gauss-Markov correlation times [s] (only used when --gm is selected)
-constexpr double tau_acc = 3600.0;
-constexpr double tau_gyro = 3600.0;
+/// Bias correlation times [s]. For GM these set the mean-reversion; for the
+/// Wiener (ConstantBias) branch they set the horizon over which the random-walk
+/// PSD is matched to the GM variance. Single source of truth for both.
+constexpr double tau_acc = 3600;
+constexpr double tau_gyro = 3600;
 
 /// Smoother lag [s]
 constexpr double smoother_lag = 10.0;
@@ -86,12 +88,13 @@ const std::string default_output_dir =
 /// simulation_data_<run>_100Hz[_noisy][_biased]_aided_at_<aiding_hz>Hz_cpp.csv
 /// (run is the simulator's iteration/%02d index; aiding_hz its aiding_Hz).
 inline std::string build_input_file(bool with_noise, bool with_bias,
-                                    int aiding_hz, int run) {
+                                    bool with_highfid, int aiding_hz, int run) {
   char run_str[8];
   snprintf(run_str, sizeof(run_str), "%02d", run);
   std::string f = default_data_dir + "simulation_data_" + run_str + "_100Hz";
   if (with_noise) f += "_noisy";
   if (with_bias) f += "_biased";
+  if (with_highfid) f += "_highfid";
   f += "_aided_at_" + std::to_string(aiding_hz) + "Hz_cpp.csv";
   return f;
 }
@@ -101,14 +104,14 @@ struct Options {
   bool use_gauss_markov = true;
   bool use_se23 = true;
   Aiding aiding_scheme = Aiding::PARSFull;
-  bool with_noise = true;   // select the _noisy input variant
-  bool with_bias = true;    // select the _biased input variant
-  int aiding_hz = 10;       // aiding rate [Hz] baked into the input filename
-  int run = 1;              // Monte Carlo run index in the input filename
-  std::string input_file;   // empty -> built from with_noise/with_bias/aiding_hz
+  bool with_noise = true;  // select the _noisy input variant
+  bool with_bias = true;   // select the _biased input variant
+  int aiding_hz = 10;      // aiding rate [Hz] baked into the input filename
+  int run = 1;             // Monte Carlo run index in the input filename
+  std::string input_file;  // empty -> built from with_noise/with_bias/aiding_hz
   std::string output_dir = default_output_dir;
-  std::string output_suffix;   // Appended before `.csv` in the output filename.
-  double duration = 0.0;       // Run-length cap in seconds; 0 = run to end.
+  std::string output_suffix;  // Appended before `.csv` in the output filename.
+  double duration = 0.0;      // Run-length cap in seconds; 0 = run to end.
   bool init_from_truth = false;  // When true, initialise state from truth
                                  // (auto-enabled for Aiding::None).
 
@@ -117,6 +120,11 @@ struct Options {
       gtsam::SE23CovarianceMethod::Brossard;
   gtsam::SE23IncrementModel increment =
       gtsam::SE23IncrementModel::SimpleGlobalAcc;
+  // Select the input dataset's IMU specific-force projection
+  // (run_orbital_simulation highfid_imu): false -> standard file (start-of-step
+  // projection), true -> the *_highfid file (midpoint-frame specific force ->
+  // physically fair simple-vs-full comparison; the truth PVA is unchanged).
+  bool imu_gen_highfid = false;
 };
 
 // ============================================================================
@@ -242,8 +250,7 @@ auto read_simulation_csv(const std::string& filename)
 
 /// Minimal position-only measurement factor on ExtendedPose3.
 /// Residual = position(X) - measured, so the 3x9 Jacobian picks the rho block.
-class GPSFactorSE23
-    : public gtsam::NoiseModelFactorN<gtsam::ExtendedPose3> {
+class GPSFactorSE23 : public gtsam::NoiseModelFactorN<gtsam::ExtendedPose3> {
   gtsam::Point3 measured_;
 
  public:
@@ -252,9 +259,8 @@ class GPSFactorSE23
       : gtsam::NoiseModelFactorN<gtsam::ExtendedPose3>(model, key),
         measured_(measured) {}
 
-  gtsam::Vector evaluateError(
-      const gtsam::ExtendedPose3& X,
-      gtsam::OptionalMatrixType H) const override {
+  gtsam::Vector evaluateError(const gtsam::ExtendedPose3& X,
+                              gtsam::OptionalMatrixType H) const override {
     if (H) {
       gtsam::Matrix H_p(3, 9);
       gtsam::Point3 p = X.position(H_p);
@@ -272,20 +278,18 @@ class GPSFactorSE23
 template <class BIAS, bool UseSE23>
 void run_estimation(const SimulationData& sd, const Options& opts) {
   // -- Select preintegrator / factor family --
-  using PIMLegacy =
-      gtsam::PreintegratedCombinedMeasurementsT<
-          gtsam::ManifoldPreintegration<BIAS>, BIAS>;
+  using PIMLegacy = gtsam::PreintegratedCombinedMeasurementsT<
+      gtsam::ManifoldPreintegration<BIAS>, BIAS>;
   using FactorLegacy = gtsam::CombinedImuFactorT<PIMLegacy, BIAS>;
 
-  using PIMSE23 =
-      gtsam::PreintegratedCombinedMeasurements2T<
-          gtsam::ManifoldPreintegrationSE23<BIAS>, BIAS>;
+  using PIMSE23 = gtsam::PreintegratedCombinedMeasurements2T<
+      gtsam::ManifoldPreintegrationSE23<BIAS>, BIAS>;
   using FactorSE23 = gtsam::CombinedImuFactor2T<PIMSE23, BIAS>;
 
   using PIM = std::conditional_t<UseSE23, PIMSE23, PIMLegacy>;
   using Factor = std::conditional_t<UseSE23, FactorSE23, FactorLegacy>;
-  using StateType = std::conditional_t<UseSE23, gtsam::ExtendedPose3,
-                                       gtsam::NavState>;
+  using StateType =
+      std::conditional_t<UseSE23, gtsam::ExtendedPose3, gtsam::NavState>;
 
   const double g0 = 9.81;
   const double dt = 1.0 / sd.freq();
@@ -295,15 +299,43 @@ void run_estimation(const SimulationData& sd, const Options& opts) {
   double arw = 0.15;
   double bias_instability_acc = 0.05;  // milli g
   double bias_instability_ars = 0.5;   // deg per hour
-  double T_acc = 3600.0;
-  double T_ars = 3600.0;
+  // Correlation times: reuse the single source of truth (tau_acc/tau_gyro) so
+  // the GM prior (mean-reversion) and the driving PSD below share one tau.
+  const double T_acc = tau_acc;
+  const double T_ars = tau_gyro;
 
   double sigma_v = vrw / 60.0;
   double sigma_q = (arw / 60.0) * deg2rad(1.0);
-  double sigma_b_acc =
-      std::sqrt((2.0 / T_acc) * (bias_instability_acc * (g0 / 1000.0)));
-  double sigma_b_ars =
-      std::sqrt((2.0 / T_ars) * (bias_instability_ars / 3600.0) * deg2rad(1.0));
+
+  // Stationary bias standard deviation (Allan bias-instability floor).
+  const double sig_stat_acc = bias_instability_acc * (g0 / 1000.0);  // m/s^2
+  const double sig_stat_ars =
+      (bias_instability_ars / 3600.0) * deg2rad(1.0);  // rad/s
+  // Stationary bias variance P_inf = sigma^2, dimensionally a variance.
+  const double P_inf_acc = sig_stat_acc * sig_stat_acc;  // (m/s^2)^2
+  const double P_inf_ars = sig_stat_ars * sig_stat_ars;  // (rad/s)^2
+  const double t_eval = 1.0;  // horizon at which GM and Wiener variances match
+
+  // Bias sigma used to initialise the driving Q (biasAccCovariance = sigma^2).
+  // sigma^2 is then a continuous PSD with units (m/s^2)^2/s and (rad/s)^2/s.
+  // GM uses the GM driving PSD 2*P_inf/tau; the Wiener (ConstantBias) branch
+  // uses the PSD whose t_eval-integral equals the GM variance at t_eval, so
+  // both bias methods share the same covariance at t = t_eval seconds.
+  double sigma_b_acc, sigma_b_ars;
+  if constexpr (std::is_same_v<BIAS, gtsam::imuBias::GaussMarkovBias>) {
+    sigma_b_acc = std::sqrt((2.0 / T_acc) * P_inf_acc);
+    sigma_b_ars = std::sqrt((2.0 / T_ars) * P_inf_ars);
+  } else {
+    sigma_b_acc =
+        std::sqrt(P_inf_acc * (1.0 - std::exp(-2.0 * t_eval / T_acc)) / t_eval);
+    sigma_b_ars =
+        std::sqrt(P_inf_ars * (1.0 - std::exp(-2.0 * t_eval / T_ars)) / t_eval);
+  }
+
+  std::cout << "sigma_q: " << sigma_q << "\n";
+  std::cout << "sigma_v: " << sigma_v << "\n";
+  std::cout << "sigma_b_acc: " << sigma_b_acc << "\n";
+  std::cout << "sigma_b_ars: " << sigma_b_ars << "\n";
 
   // Preintegration params
   auto p = gtsam::PreintegrationCombinedParamsT<BIAS>::MakeSharedD(g0);
@@ -408,9 +440,9 @@ void run_estimation(const SimulationData& sd, const Options& opts) {
   // --- Preintegrator ---
   std::shared_ptr<PIM> preintegrated;
   if constexpr (UseSE23) {
-    preintegrated = std::make_shared<PIM>(
-        p, prior_bias, Eigen::Matrix<double, 15, 15>::Zero(), opts.increment,
-        opts.cov_method);
+    preintegrated = std::make_shared<PIM>(p, prior_bias,
+                                          Eigen::Matrix<double, 15, 15>::Zero(),
+                                          opts.increment, opts.cov_method);
   } else {
     preintegrated = std::make_shared<PIM>(p, prior_bias);
   }
@@ -460,15 +492,15 @@ void run_estimation(const SimulationData& sd, const Options& opts) {
   // Optional run-length cap (0 disables).
   const uint64_t max_idx =
       (opts.duration > 0.0)
-          ? std::min<uint64_t>(
-                sd.N, static_cast<uint64_t>(opts.duration / dt) + 1)
+          ? std::min<uint64_t>(sd.N,
+                               static_cast<uint64_t>(opts.duration / dt) + 1)
           : sd.N;
 
   // Aiding cadence: the CSV stores the IMU rate (freq) and the aiding rate
   // (aiding_freq) in Hz; the stride is their ratio. Read from the data so
   // changing the aiding rate in the simulator alone is honoured here.
-  const uint16_t aiding_stride =
-      std::max<uint16_t>(1, sd.freq() / std::max<uint16_t>(1, sd.aiding_freq()));
+  const uint16_t aiding_stride = std::max<uint16_t>(
+      1, sd.freq() / std::max<uint16_t>(1, sd.aiding_freq()));
 
   for (uint64_t idx = 1; idx < max_idx; ++idx) {
     Eigen::Vector3d f = imu_f.row(idx).transpose();
@@ -635,7 +667,8 @@ void run_estimation(const SimulationData& sd, const Options& opts) {
         if constexpr (UseSE23) {
           graph.add(GPSFactorSE23(X(correction_count), gps_meas, gnss_noise));
         } else {
-          graph.add(gtsam::GPSFactor(X(correction_count), gps_meas, gnss_noise));
+          graph.add(
+              gtsam::GPSFactor(X(correction_count), gps_meas, gnss_noise));
         }
       } else if (active_aiding == Aiding::PARSFull) {
         using PoseParam =
@@ -837,8 +870,7 @@ void run_estimation(const SimulationData& sd, const Options& opts) {
              "%.8f,%.8f,%.8f,"
              "%.8f,%.8f,%.8f,"
              "%.8f,%.8f,%.8f\n",
-             ts,
-             ep.x(), ep.y(), ep.z(), ev.x(), ev.y(), ev.z(), ea.roll(),
+             ts, ep.x(), ep.y(), ep.z(), ev.x(), ev.y(), ev.z(), ea.roll(),
              ea.pitch(), ea.yaw(), pe.x(), pe.y(), pe.z(), ve.x(), ve.y(),
              ve.z(), ae.x(), ae.y(), ae.z(), abe.x(), abe.y(), abe.z(), gbe.x(),
              gbe.y(), gbe.z(), s3(0), s3(1), s3(2), s3(3), s3(4), s3(5), s3(6),
@@ -865,25 +897,37 @@ void print_usage(const char* prog) {
       << "                           cb = constant / random-walk bias\n"
       << "  --preint {se23|legacy}   preintegrator (default: se23)\n"
       << "                           se23   = ManifoldPreintegrationSE23 +\n"
-      << "                                    CombinedImuFactor2 on ExtendedPose3\n"
+      << "                                    CombinedImuFactor2 on "
+         "ExtendedPose3\n"
       << "                           legacy = ManifoldPreintegration +\n"
-      << "                                    CombinedImuFactor on (Pose3, Vector3)\n"
+      << "                                    CombinedImuFactor on (Pose3, "
+         "Vector3)\n"
       << "  --aiding {gnss|pars|none} aiding scheme (default: pars)\n"
       << "                           none = IMU-only; auto-enables init\n"
       << "                                  from ground truth\n"
       << "  --covmethod {brossard|ours|vanloan}  se23 process-noise method\n"
       << "                           (default: brossard)\n"
       << "  --increment {simple|full}  se23 increment model (default: simple)\n"
-      << "  --duration <seconds>     cap run length (0 = full data, default 0)\n"
-      << "  --with-noise|--no-noise  use the _noisy input variant (default on);\n"
+      << "  --imu-gen {simple|highfid} input dataset specific-force "
+         "projection;\n"
+      << "                             highfid selects the *_highfid file "
+         "(default: simple)\n"
+      << "  --duration <seconds>     cap run length (0 = full data, default "
+         "0)\n"
+      << "  --with-noise|--no-noise  use the _noisy input variant (default "
+         "on);\n"
       << "                           --no-noise selects the noiseless data\n"
-      << "  --with-bias|--no-bias    use the _biased input variant (default on);\n"
+      << "  --with-bias|--no-bias    use the _biased input variant (default "
+         "on);\n"
       << "                           --no-bias selects the biasless data\n"
       << "  --aiding-hz <N>          aiding rate [Hz] in the input filename\n"
-      << "                           (default 10 -> _aided_at_10Hz); the stride\n"
-      << "                           is derived from the CSV (imu_hz/aiding_hz)\n"
+      << "                           (default 10 -> _aided_at_10Hz); the "
+         "stride\n"
+      << "                           is derived from the CSV "
+         "(imu_hz/aiding_hz)\n"
       << "  --run <N>                Monte Carlo run index in the input\n"
-      << "                           filename (simulation_data_<N>_..., default 1)\n"
+      << "                           filename (simulation_data_<N>_..., "
+         "default 1)\n"
       << "  --init-from-truth        initialise state from truth columns\n"
       << "                           (default on when --aiding none)\n"
       << "  --input <path>           input simulation CSV (overrides\n"
@@ -910,15 +954,25 @@ bool parse_args(int argc, char** argv, Options& opts) {
     } else if (a == "--bias") {
       if (!need_value(i, a)) return false;
       std::string v = argv[++i];
-      if (v == "gm") opts.use_gauss_markov = true;
-      else if (v == "cb") opts.use_gauss_markov = false;
-      else { std::cerr << "Unknown --bias value: " << v << "\n"; return false; }
+      if (v == "gm")
+        opts.use_gauss_markov = true;
+      else if (v == "cb")
+        opts.use_gauss_markov = false;
+      else {
+        std::cerr << "Unknown --bias value: " << v << "\n";
+        return false;
+      }
     } else if (a == "--preint") {
       if (!need_value(i, a)) return false;
       std::string v = argv[++i];
-      if (v == "se23") opts.use_se23 = true;
-      else if (v == "legacy") opts.use_se23 = false;
-      else { std::cerr << "Unknown --preint value: " << v << "\n"; return false; }
+      if (v == "se23")
+        opts.use_se23 = true;
+      else if (v == "legacy")
+        opts.use_se23 = false;
+      else {
+        std::cerr << "Unknown --preint value: " << v << "\n";
+        return false;
+      }
     } else if (a == "--covmethod") {
       if (!need_value(i, a)) return false;
       std::string v = argv[++i];
@@ -943,13 +997,30 @@ bool parse_args(int argc, char** argv, Options& opts) {
         std::cerr << "Unknown --increment value: " << v << "\n";
         return false;
       }
+    } else if (a == "--imu-gen") {
+      if (!need_value(i, a)) return false;
+      std::string v = argv[++i];
+      if (v == "simple")
+        opts.imu_gen_highfid = false;
+      else if (v == "highfid")
+        opts.imu_gen_highfid = true;
+      else {
+        std::cerr << "Unknown --imu-gen value: " << v << "\n";
+        return false;
+      }
     } else if (a == "--aiding") {
       if (!need_value(i, a)) return false;
       std::string v = argv[++i];
-      if (v == "gnss") opts.aiding_scheme = Aiding::GNSS;
-      else if (v == "pars") opts.aiding_scheme = Aiding::PARSFull;
-      else if (v == "none") opts.aiding_scheme = Aiding::None;
-      else { std::cerr << "Unknown --aiding value: " << v << "\n"; return false; }
+      if (v == "gnss")
+        opts.aiding_scheme = Aiding::GNSS;
+      else if (v == "pars")
+        opts.aiding_scheme = Aiding::PARSFull;
+      else if (v == "none")
+        opts.aiding_scheme = Aiding::None;
+      else {
+        std::cerr << "Unknown --aiding value: " << v << "\n";
+        return false;
+      }
     } else if (a == "--duration") {
       if (!need_value(i, a)) return false;
       opts.duration = std::stod(argv[++i]);
@@ -995,10 +1066,12 @@ int main(int argc, char* argv[]) {
   Options opts;
   if (!parse_args(argc, argv, opts)) return 1;
 
-  // Resolve the input file from the noise/bias flags unless --input overrode it.
+  // Resolve the input file from the noise/bias flags unless --input overrode
+  // it.
   if (opts.input_file.empty()) {
-    opts.input_file = build_input_file(opts.with_noise, opts.with_bias,
-                                       opts.aiding_hz, opts.run);
+    opts.input_file =
+        build_input_file(opts.with_noise, opts.with_bias, opts.imu_gen_highfid,
+                         opts.aiding_hz, opts.run);
   }
 
   // No-aiding runs default to initialising at ground truth so the plot shows

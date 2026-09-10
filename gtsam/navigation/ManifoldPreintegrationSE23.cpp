@@ -83,6 +83,16 @@ inline Matrix3 se23_C_hat(const Vector3& w_hat, double dt) {
   return C;
 }
 
+/// Constant-body-force position-increment kernel (the MEAN position kernel):
+///   M(w,dt) = ∫₀ᵈᵗ ∫₀ᵘ Exp(w τ) dτ du = dt²·J_l(w·dt) − ∫₀ᵈᵗ τ·Exp(w τ) dτ.
+/// NOTE: this is NOT se23_C_hat = ∫₀ᵈᵗ τ·Exp(−w τ) dτ, which is the noise-gain
+/// (G_j) kernel. Using C_hat as the mean kernel drifts position under rotation.
+/// Since ∫τExp(+w τ) equals se23_C_hat evaluated at −w (only the odd Sω term
+/// flips), M(w,dt) = dt²·J_l(w dt) − se23_C_hat(−w, dt).
+inline Matrix3 se23_pos_kernel(const Vector3& w_hat, double dt) {
+  return dt * dt * so3_J_l(w_hat * dt) - se23_C_hat(-w_hat, dt);
+}
+
 /// SE_2(3) Ypsilon_hat(w_hat, f_hat, dt) — Eq. 36 Brossard et al.
 /// No longer used for state propagation (we compose intrinsically instead to
 /// keep R on SO(3)); retained for reference / potential covariance checks.
@@ -125,63 +135,44 @@ inline Matrix96 se23_G_j_simple(const Vector3& w_hat, const Vector3& /*f_hat*/,
   return G;
 }
 
-/// SE_2(3) input Jacobian G_j for the ConstantBodyImu increment (ref §4c),
-/// cols [acc(0-2), gyro(3-5)], rows [theta, nu, rho]. Adds the gyro->nu and
-/// gyro->rho coupling (d_v, d_p) absent from the simple model.
+/// One-step ConstantBodyImu increment Yhat = (Exp(w*dt), J_l(w*dt)*f*dt,
+/// M(w,dt)*f) — the SAME element update() advances the mean with, so the mean
+/// and the gain below stay paired by construction.
+inline ExtendedPose3 se23_full_increment(const Vector3& f_hat,
+                                         const Vector3& w_hat, double dt) {
+  return ExtendedPose3(Rot3::Expmap(w_hat * dt),
+                       so3_J_l(w_hat * dt) * f_hat * dt,
+                       se23_pos_kernel(w_hat, dt) * f_hat);
+}
+
+/// SE_2(3) input Jacobian G_j for the ConstantBodyImu increment, cols
+/// [acc(0-2), gyro(3-5)], rows [theta, nu, rho]. Computed by central finite
+/// differences of the increment tangent d log(Yhat^{-1} Yhat(meas+delta)) — so
+/// the (mean, gain) pairing (ref §9, Remark 5) holds exactly, instead of the
+/// hand-derived d_v/d_p kernels (whose d_p was tied to the wrong C_hat mean and
+/// silently broke when the mean was corrected to M). Bias enters as
+/// meas_corrected = meas - bias, so G = -d/d(meas).
 inline Matrix96 se23_G_j_full(const Vector3& w_hat, const Vector3& f_hat,
                               double dt) {
-  const Matrix3 Rm = Rot3::Expmap(-w_hat * dt).matrix();  // Exp(-w_hat*dt)
-  const Matrix3 Sw = skewSymmetric(w_hat);
-  const Matrix3 Sf = skewSymmetric(f_hat);
-  const Vector3 Swf = Sw * f_hat;         // Sω f̂
-  const Vector3 Sw2f = Sw * Swf;          // Sω² f̂
-  const Matrix3 S_Swf = skewSymmetric(Swf);
-  const double w = w_hat.norm();
-  const double dt2 = dt * dt;
-
-  // Coefficient functions (ref §4c). Small-angle guarded.
-  double A_con, B_con, a_con, b_con;
-  Matrix13 dA_con, dB_con, da_con, db_con;
-  if (w < 1e-8) {
-    A_con = 0.5 * dt2;
-    B_con = dt2 * dt / 6.0;
-    a_con = dt2 * dt / 3.0;
-    b_con = dt2 * dt2 / 8.0;
-    dA_con.setZero();
-    dB_con.setZero();
-    da_con.setZero();
-    db_con.setZero();
-  } else {
-    const double th = w * dt;
-    const double s = std::sin(th), c = std::cos(th);
-    const double w2 = w * w, w3 = w2 * w, w4 = w2 * w2, w5 = w4 * w, w6 = w4 * w2;
-    const Matrix13 phiT = w_hat.transpose();
-    A_con = (1.0 - c) / w2;
-    B_con = (th - s) / w3;
-    a_con = (th * c - s) / w3;
-    b_con = (0.5 * th * th - c - th * s + 1.0) / w4;
-    dA_con = (phiT / w4) * (th * s - 2.0 + 2.0 * c);
-    dB_con = (phiT / w5) * (-2.0 * th - th * c + 3.0 * s);
-    da_con = (phiT / w5) * (-w2 * dt2 * s - 3.0 * th * c + 3.0 * s);
-    db_con = (phiT / w6) *
-             (-w2 * dt2 - w2 * dt2 * c - 4.0 * (-c - th * s + 1.0));
+  const ExtendedPose3 Yinv = se23_full_increment(f_hat, w_hat, dt).inverse();
+  const double eps = 1e-6, inv2e = 1.0 / (2.0 * eps);
+  Matrix96 G;
+  for (int j = 0; j < 3; ++j) {
+    Vector3 e = Vector3::Zero();
+    e(j) = eps;
+    const Vector9 dacc =
+        ExtendedPose3::Logmap(
+            Yinv.compose(se23_full_increment(f_hat + e, w_hat, dt))) -
+        ExtendedPose3::Logmap(
+            Yinv.compose(se23_full_increment(f_hat - e, w_hat, dt)));
+    const Vector9 dgyr =
+        ExtendedPose3::Logmap(
+            Yinv.compose(se23_full_increment(f_hat, w_hat + e, dt))) -
+        ExtendedPose3::Logmap(
+            Yinv.compose(se23_full_increment(f_hat, w_hat - e, dt)));
+    G.col(j) = -dacc * inv2e;      // acc column j
+    G.col(3 + j) = -dgyr * inv2e;  // gyro column j
   }
-
-  // d_v, d_p (3x3): ref §4c.
-  const Matrix3 d_v = -A_con * Sf - B_con * (Sw * Sf + S_Swf) +
-                      Swf * dA_con + Sw2f * dB_con;
-  const Matrix3 d_p = -a_con * Sf - b_con * (Sw * Sf + S_Swf) +
-                      Swf * da_con + Sw2f * db_con;
-
-  Matrix96 G = Matrix96::Zero();
-  // theta row: gyro only.
-  G.block<3, 3>(0, 3) = -so3_J_l_inv(w_hat * dt) * dt;
-  // nu row: gyro (d_v) and acc (J_l*dt).
-  G.block<3, 3>(3, 3) = -Rm * d_v;
-  G.block<3, 3>(3, 0) = -Rm * so3_J_l(w_hat * dt) * dt;
-  // rho row: gyro (d_p) and acc (C_hat).
-  G.block<3, 3>(6, 3) = -Rm * d_p;
-  G.block<3, 3>(6, 0) = -Rm * se23_C_hat(w_hat, dt);
   return G;
 }
 
@@ -289,7 +280,7 @@ void ManifoldPreintegrationSE23<Bias>::update(
       break;
     case SE23IncrementModel::ConstantBodyImu:  // constant body specific force
       dv_b = so3_J_l(omega * dt) * acc * dt;
-      dp_b = se23_C_hat(omega, dt) * acc;
+      dp_b = se23_pos_kernel(omega, dt) * acc;
       break;
   }
   const ExtendedPose3 Yhat(dR, dv_b, dp_b);
